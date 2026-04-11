@@ -4,6 +4,10 @@
   "version": "0.1.0-alpha.1",
   "description": "Multimodal AI analysis for Tropy: suggests tags and descriptions with researcher review.",
   "main": "index.js",
+  "scripts": {
+    "build": "rollup -c rollup.config.mjs",
+    "watch": "rollup -c rollup.config.mjs --watch"
+  },
   "hooks": {
     "export": true
   },

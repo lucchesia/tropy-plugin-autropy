@@ -156,11 +156,47 @@ class AutropyPlugin {
       const panel = document.getElementById('autropy-panel')
       if (panel) {
         this.#removePanel()
-      } else {
-        // UNVERIFIED ASSUMPTION: context.emit or similar API exists to trigger
-        //   the export hook programmatically from the toolbar click.
-        //   This path needs verification — may require a different approach.
-        this.context.logger.info('[AUTROPY] toolbar toggle clicked — awaiting export hook trigger')
+        return
+      }
+
+      // WORKAROUND (alpha): toolbar click directly invokes export logic rather than
+      // triggering Tropy's export hook mechanism. The correct approach — using
+      // context.emit or equivalent to fire the hook — requires confirmation from
+      // the Tropy dev team. Replace this before stable release!
+      //
+      // UNVERIFIED ASSUMPTION: tropy.state() is available as a global in the renderer.
+      // UNVERIFIED ASSUMPTION: tropy.state().nav.photo holds the active photo ID.
+      // UNVERIFIED ASSUMPTION: tropy.state().nav.items[0] holds the active item ID.
+      // UNVERIFIED ASSUMPTION: tropy.state().photos[photoId] has { id, path }.
+      try {
+        const state = tropy.state() // eslint-disable-line no-undef
+        const photoId = state?.nav?.photo
+        const itemId = state?.nav?.items?.[0]
+
+        if (!photoId || !itemId) {
+          this.context.logger.warn('[AUTROPY] no active photo or item in nav state — cannot analyze')
+          return
+        }
+
+        const photo = state?.photos?.[photoId]
+        if (!photo?.path) {
+          this.context.logger.warn(`[AUTROPY] photo ${photoId} has no path in state — cannot analyze`)
+          return
+        }
+
+        // Construct a minimal items array matching what the export hook would receive
+        const items = [{ id: itemId, photos: [{ id: photoId, path: photo.path }] }]
+        this.export(items).catch(err => {
+          this.context.logger.error(
+            { stack: err.stack },
+            `[AUTROPY] analysis failed from toolbar click: ${err.message}`
+          )
+        })
+      } catch (err) {
+        this.context.logger.error(
+          { stack: err.stack },
+          `[AUTROPY] failed to read tropy state: ${err.message}`
+        )
       }
     })
 
