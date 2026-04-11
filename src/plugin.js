@@ -52,36 +52,58 @@ class AutropyPlugin {
   #toolbarInjected = false
 
   // ---------------------------------------------------------------------------
-  // Export hook — main entry point
-  // UNVERIFIED ASSUMPTION: export(items) receives an array of item objects, each
-  //   with { id, photos: [{ id, path, ... }], tags: [...] }.
-  //   Confirm exact shape against Tropy 1.18 Beta source or DevTools inspection.
-  // UNVERIFIED ASSUMPTION: items[0].photos[0] is the currently visible photo.
-  //   For multi-photo items, Tropy may pass all photos — we take the first.
+  // Export hook — menu trigger entry point
+  //
+  // CONFIRMED (dom_injection_test_results.md): alpha trigger is toolbar icon click
+  //   only. Export hook is kept to provide the File > Export menu item, but
+  //   delegates directly to #runAnalysis() rather than reading the items parameter.
+  //
+  // UNVERIFIED: items parameter shape — array element shape is not confirmed.
+  //   Using tropy.state() instead (confirmed working in dom_injection_test_results.md).
   // ---------------------------------------------------------------------------
   async export (items) {
+    console.log('[AUTROPY] export called — items:', JSON.stringify(items))
+    // ALPHA: items shape unconfirmed. Fall through to tropy.state() path.
+    await this.#runAnalysis()
+  }
+
+  // ---------------------------------------------------------------------------
+  // #runAnalysis — shared analysis entry point for toolbar click and export hook
+  //
+  // CONFIRMED (dom_injection_test_results.md):
+  //   tropy.state().nav.items[0]  → active item ID (integer)
+  //   tropy.state().nav.photo     → active photo ID (integer)
+  //   tropy.state().photos[id]    → full photo object including .path and .item
+  // ---------------------------------------------------------------------------
+  async #runAnalysis () {
     let { logger } = this.context
     let { provider, model, apiKey, port, prompt, suggestMetadata } = this.options
 
-    if (!items || items.length === 0) {
-      logger.warn('[AUTROPY] export hook fired with no items — nothing to analyze')
+    // CONFIRMED: tropy global and Redux state are available in the renderer process
+    let state
+    try {
+      state = tropy.state() // eslint-disable-line no-undef
+    } catch (err) {
+      logger.warn('[AUTROPY] tropy.state() not available — cannot analyze')
       return
     }
 
-    const item = items[0]
-    // UNVERIFIED ASSUMPTION: item.id is the numeric item ID used by the REST API.
-    const itemId = item.id
+    const photoId = state?.nav?.photo
+    const itemId = state?.nav?.items?.[0]
 
-    if (!item.photos || item.photos.length === 0) {
-      logger.warn(`[AUTROPY] item ${itemId} has no photos — nothing to analyze`)
+    if (!photoId || !itemId) {
+      logger.warn('[AUTROPY] no active photo or item in nav state — cannot analyze')
       return
     }
 
-    // UNVERIFIED ASSUMPTION: item.photos[0] is the active/visible photo.
-    const photo = item.photos[0]
-    const photoId = photo.id
+    // CONFIRMED: photo object in Redux state includes .path (absolute filesystem path)
+    const photo = state?.photos?.[photoId]
+    if (!photo?.path) {
+      logger.warn(`[AUTROPY] photo ${photoId} has no path in state — cannot analyze`)
+      return
+    }
 
-    logger.info(`[AUTROPY] starting analysis — item ${itemId}, photo ${photoId}`)
+    logger.warn(`[AUTROPY] starting analysis — item ${itemId}, photo ${photoId}`)
 
     try {
       // Fetch project tags for grounding the prompt and chip styling
@@ -101,9 +123,9 @@ class AutropyPlugin {
       const imageBuffer = readFileSync(photo.path)
       const base64 = imageBuffer.toString('base64')
 
-      logger.info(`[AUTROPY] calling ${provider}/${model}...`)
+      logger.warn(`[AUTROPY] calling ${provider}/${model}...`)
       const result = await analyzeImage(base64, finalPrompt, provider, model, apiKey)
-      logger.info(`[AUTROPY] analysis complete — confidence ${result.confidence}`)
+      logger.warn(`[AUTROPY] analysis complete — confidence ${result.confidence}`)
 
       // Stash state for use by panel event handlers
       this.#state = { itemId, photoId, result, existingTags }
@@ -118,25 +140,33 @@ class AutropyPlugin {
   // ---------------------------------------------------------------------------
   // Toolbar toggle injection
   //
-  // CONFIRMED: toolbar container is at '.esper-header .toolbar-left'
-  //   (the image viewer toolbar inside section.esper > .esper-container >
-  //   header.esper-header). Verified from DevTools DOM inspection.
-  // CONFIRMED: Tropy toolbar items use <span class="btn btn-md btn-icon">,
-  //   not <button>. Verified from DevTools DOM inspection.
-  // CONFIRMED: selector '.esper-header .toolbar-left' targets the correct
-  //   toolbar — there may be multiple .toolbar-left elements in the DOM
-  //   (item panel, note panel headers); querySelectorAll + filtering by
-  //   closest('.esper-header') ensures we target the image viewer only.
-  // UNVERIFIED ASSUMPTION: toolbar injection persists across React re-renders.
-  //   Confirmed in DOM tests but not yet verified in live plugin context.
+  // CONFIRMED (dom_injection_test_results.md):
+  //   - Find the esper tool-group by button titles (locale-aware, not by index)
+  //   - Insert AUTROPY as a new div.tool-group BEFORE the esper group
+  //   - Do NOT append the btn into an existing group — Tropy's own group click
+  //     handlers fire and break the toggle (shows only a CSS flash)
+  //   - Toolbar items use <span class="btn btn-md btn-icon">, not <button>
+  //   - SVG icon (magnifying glass + sparkle) confirmed rendering at 16×16
   // ---------------------------------------------------------------------------
   #injectToolbarToggle () {
     if (this.#toolbarInjected) return
 
-    // CONFIRMED: .esper-header .toolbar-left is the image viewer toolbar
-    const toolbar = document.querySelector('.esper-header .toolbar-left')
-    if (!toolbar) {
-      this.context.logger.warn('[AUTROPY] esper toolbar not found — toggle not injected')
+    // CONFIRMED: find esper tool-group by button titles — index is fragile
+    // Portuguese titles are from Anita's instance; English variants included for portability.
+    let esperGroup = null
+    for (const g of document.querySelectorAll('.tool-group')) {
+      const titles = [...g.querySelectorAll('.btn')].map(b => b.title)
+      if (titles.some(t =>
+        t.includes('Maximizar') || t.includes('sobreposição') ||
+        t.includes('Maximize') || t.includes('overlay')
+      )) {
+        esperGroup = g
+        break
+      }
+    }
+
+    if (!esperGroup) {
+      this.context.logger.warn('[AUTROPY] esper toolbar group not found — toggle not injected')
       return
     }
 
@@ -145,12 +175,9 @@ class AutropyPlugin {
     btn.id = 'autropy-toggle'
     btn.className = 'btn btn-md btn-icon'
     btn.title = 'AUTROPY — analyze this photo'
-    // SVG matches Tropy's icon visual language: viewBox 0 0 16 16, fill currentColor,
-    // no explicit stroke, thin-line aesthetic consistent with surrounding toolbar icons.
-    // Icon depicts a sparkle/AI analysis symbol — brain outline with radial marks.
-    // UNVERIFIED ASSUMPTION: this SVG renders correctly at 16×16 in the toolbar.
-    //   Replace paths after visual confirmation in Tropy Beta.
-    btn.innerHTML = `<span class="icon icon-autropy"><svg width="16" height="16" viewBox="0 0 16 16"><g class="line" fill="currentColor"><path d="M8,1a.5.5,0,0,1,.5.5V3h1V1.5a.5.5,0,0,1,1,0V3a2,2,0,0,1,2,2v.5h1.5a.5.5,0,0,1,0,1H12.5v1H14a.5.5,0,0,1,0,1H12.5V9a2,2,0,0,1-2,2V12.5a.5.5,0,0,1-1,0V11h-1v1.5a.5.5,0,0,1-1,0V11A2,2,0,0,1,5.5,9V8.5H4a.5.5,0,0,1,0-1H5.5v-1H4a.5.5,0,0,1,0-1H5.5V5a2,2,0,0,1,2-2V1.5A.5.5,0,0,1,8,1ZM8,4A1,1,0,0,0,7,5v6a1,1,0,0,0,2,0V5A1,1,0,0,0,8,4Z"/><rect x="7" y="13.5" width="2" height="1.5" rx="0.5"/><rect x="7" y="1" width="2" height="1.5" rx="0.5" transform="translate(16 3.5) rotate(180)"/></g></svg></span>`
+    // CONFIRMED (dom_injection_test_results.md): magnifying glass + sparkle SVG
+    // renders correctly at 16×16 in the Tropy Beta toolbar.
+    btn.innerHTML = `<span class="icon icon-autropy"><svg width="16" height="16" viewBox="0 0 16 16"><g class="line" fill="currentColor"><path fill-rule="evenodd" d="M6,1a5,5,0,1,0,5,5A5,5,0,0,0,6,1Zm0,8.5A3.5,3.5,0,1,1,9.5,6,3.5,3.5,0,0,1,6,9.5Z"/><path d="M9.2,9.2l5.1,5.1a.5.5,0,0,1-.7.7L8.5,9.9a.5.5,0,0,1,.7-.7Z"/><path d="M6,4.2l.5,1.3L7.8,6l-1.3.5L6,7.8,5.5,6.5,4.2,6l1.3-.5Z"/></g></svg></span>`
 
     btn.addEventListener('click', () => {
       const panel = document.getElementById('autropy-panel')
@@ -159,71 +186,48 @@ class AutropyPlugin {
         return
       }
 
-      // WORKAROUND (alpha): toolbar click directly invokes export logic rather than
-      // triggering Tropy's export hook mechanism. The correct approach — using
-      // context.emit or equivalent to fire the hook — requires confirmation from
-      // the Tropy dev team. Replace this before stable release!
-      //
-      // UNVERIFIED ASSUMPTION: tropy.state() is available as a global in the renderer.
-      // UNVERIFIED ASSUMPTION: tropy.state().nav.photo holds the active photo ID.
-      // UNVERIFIED ASSUMPTION: tropy.state().nav.items[0] holds the active item ID.
-      // UNVERIFIED ASSUMPTION: tropy.state().photos[photoId] has { id, path }.
-      try {
-        const state = tropy.state() // eslint-disable-line no-undef
-        const photoId = state?.nav?.photo
-        const itemId = state?.nav?.items?.[0]
-
-        if (!photoId || !itemId) {
-          this.context.logger.warn('[AUTROPY] no active photo or item in nav state — cannot analyze')
-          return
-        }
-
-        const photo = state?.photos?.[photoId]
-        if (!photo?.path) {
-          this.context.logger.warn(`[AUTROPY] photo ${photoId} has no path in state — cannot analyze`)
-          return
-        }
-
-        // Construct a minimal items array matching what the export hook would receive
-        const items = [{ id: itemId, photos: [{ id: photoId, path: photo.path }] }]
-        this.export(items).catch(err => {
-          this.context.logger.error(
-            { stack: err.stack },
-            `[AUTROPY] analysis failed from toolbar click: ${err.message}`
-          )
-        })
-      } catch (err) {
+      this.#runAnalysis().catch(err => {
         this.context.logger.error(
           { stack: err.stack },
-          `[AUTROPY] failed to read tropy state: ${err.message}`
+          `[AUTROPY] analysis failed from toolbar click: ${err.message}`
         )
-      }
+      })
     })
 
-    toolbar.appendChild(btn)
+    // CONFIRMED: insert new tool-group BEFORE the esper group (not into it)
+    const newGroup = document.createElement('div')
+    newGroup.className = 'tool-group'
+    newGroup.appendChild(btn)
+    esperGroup.parentNode.insertBefore(newGroup, esperGroup)
+
     this.#toolbarInjected = true
-    this.context.logger.info('[AUTROPY] toolbar toggle injected into .esper-header .toolbar-left')
+    this.context.logger.warn('[AUTROPY] toolbar toggle injected before esper tool-group')
   }
 
   // ---------------------------------------------------------------------------
   // Panel injection and lifecycle
   // ---------------------------------------------------------------------------
 
-  // CONFIRMED: panel injection target is '.esper-view-container', appending
-  //   our panel as a sibling to '.esper-view' (the canvas container).
-  //   Structure: section.esper > .esper-container > .esper-view-container
-  //              > [.esper-view (canvas), .esper-panel (filters), #autropy-panel]
-  //   Verified from DevTools DOM inspection.
-  // UNVERIFIED ASSUMPTION: appending to .esper-view-container causes natural
-  //   image reflow. If not, panel will render below filters — acceptable for alpha.
+  // CONFIRMED (dom_injection_test_results.md):
+  //   - Inject into '.esper-container' (the image viewer div), NOT section.esper
+  //   - Panel positioned as position:absolute; bottom:0; left:0; right:0
+  //   - Set container to position:relative if static (required for absolute child)
+  //   - max-height:60% prevents panel from eclipsing the full image
+  //   - .esper-container is stable across React re-renders — injection persists
+  //   - Do NOT inject as flex sibling of .esper-container — disrupts flex layout
   #injectPanel (result, existingTagNames, suggestMetadata) {
     this.#removePanel() // remove any stale panel from a previous analysis
 
-    // CONFIRMED: .esper-view-container holds the canvas and filter panel
-    const container = document.querySelector('.esper-view-container')
+    // CONFIRMED: .esper-container is the image viewer div
+    const container = document.querySelector('.esper-container')
     if (!container) {
-      this.context.logger.warn('[AUTROPY] .esper-view-container not found — panel not injected')
+      this.context.logger.warn('[AUTROPY] .esper-container not found — panel not injected')
       return
+    }
+
+    // Ensure container can position absolute children
+    if (getComputedStyle(container).position === 'static') {
+      container.style.position = 'relative'
     }
 
     const wrapper = document.createElement('div')
@@ -239,7 +243,7 @@ class AutropyPlugin {
     this.#panelInjected = true
 
     this.#wirePanelEvents()
-    this.context.logger.info('[AUTROPY] review panel injected')
+    this.context.logger.warn('[AUTROPY] review panel injected into .esper-container')
   }
 
   #wirePanelEvents () {
@@ -380,7 +384,8 @@ class AutropyPlugin {
 
   async unload () {
     this.controller.abort()
-    document.getElementById('autropy-toggle')?.remove()
+    // CONFIRMED: button is wrapped in a new .tool-group — remove the wrapper, not just the btn
+    document.getElementById('autropy-toggle')?.closest('.tool-group')?.remove()
     document.getElementById('autropy-panel')?.remove()
     document.getElementById('autropy-styles')?.remove()
     this.#toolbarInjected = false

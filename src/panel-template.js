@@ -7,12 +7,13 @@
 //   4. Metadata suggestions table — only rendered when suggestMetadata option is on
 //   5. "Apply accepted" and "Dismiss" buttons
 //
-// CONFIRMED: no custom colors, fonts, or visual styles — Tropy CSS variables only.
-// UNVERIFIED ASSUMPTION: the CSS variable names below (--tropy-*, --spacing-*)
-//   are correct for Tropy Beta 1.18. Verify against Tropy's stylesheet in DevTools
-//   (DevTools > Elements > :root) if styling looks wrong after injection.
-// UNVERIFIED ASSUMPTION: autropy- prefixed IDs and classes do not conflict with
-//   any existing Tropy DOM identifiers. Verify in DevTools after first injection.
+// CONFIRMED (dom_injection_test_results.md): Tropy has NO CSS custom properties on :root.
+//   All color/font values are hardcoded computed values from DevTools inspection.
+//
+// CONFIRMED (dom_injection_test_results.md): autropy- prefix is clean (0 matches on fresh load).
+//
+// CONFIRMED (dom_injection_test_results.md): panel uses position:absolute; bottom:0 overlay
+//   inside .esper-container. max-height:60% prevents panel from eclipsing the full image.
 
 // ---------------------------------------------------------------------------
 // Chip helpers
@@ -94,6 +95,14 @@ function renderMetadataTable (metadataSuggestions) {
 const PANEL_STYLES = `
 <style id="autropy-styles">
   #autropy-panel {
+    /* CONFIRMED (dom_injection_test_results.md): absolute overlay at bottom of .esper-container */
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-height: 60%;   /* prevents panel from eclipsing the image */
+    overflow-y: auto;
+    z-index: 50;       /* above canvas; below Tropy modal dialogs */
     display: flex;
     flex-direction: column;
     gap: 8px;
