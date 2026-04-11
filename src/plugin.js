@@ -373,11 +373,23 @@ class AutropyPlugin {
   // ---------------------------------------------------------------------------
 
   async load () {
-    // Inject toolbar toggle when the plugin loads.
-    // UNVERIFIED ASSUMPTION: the Tropy renderer DOM is ready when load() is called.
-    //   If the toolbar is not present yet, #injectToolbarToggle will log a warning
-    //   and no-op — the toggle will not appear until the plugin is reloaded.
+    // Retry toolbar injection until the esper DOM is ready.
+    // CONFIRMED: load() fires before Tropy has rendered the toolbar — a direct
+    // call to #injectToolbarToggle() at this point finds no .tool-group elements
+    // and silently no-ops. Retry with 500 ms intervals for up to 10 seconds.
+    this.#scheduleToolbarInjection(0)
+  }
+
+  #scheduleToolbarInjection (attempts) {
+    if (this.#toolbarInjected) return
+    if (attempts > 20) {
+      this.context.logger.warn('[AUTROPY] toolbar not injected after 20 attempts — DOM never became ready')
+      return
+    }
     this.#injectToolbarToggle()
+    if (!this.#toolbarInjected) {
+      setTimeout(() => this.#scheduleToolbarInjection(attempts + 1), 500)
+    }
   }
 
   async unload () {
