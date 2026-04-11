@@ -230,15 +230,18 @@ export async function analyzeImage (base64, prompt, provider, model, apiKey, loc
   if (!prompt) throw new Error('[AUTROPY] analyzeImage called with no prompt')
   if (!model) throw new Error('[AUTROPY] analyzeImage called with no model')
 
-  if (provider.startsWith('gemini')) {
+  // Normalize to lowercase so "Google", "Gemini", "GPT", "Claude" all route correctly
+  const p = provider.toLowerCase()
+
+  if (p.startsWith('gemini') || p.startsWith('google')) {
     return callGemini(base64, prompt, model, apiKey)
   }
 
-  if (provider.startsWith('gpt') || provider.startsWith('openai')) {
+  if (p.startsWith('gpt') || p.startsWith('openai')) {
     return callOpenAI(base64, prompt, model, apiKey)
   }
 
-  if (provider.startsWith('claude')) {
+  if (p.startsWith('claude') || p.startsWith('anthropic')) {
     return callAnthropic(base64, prompt, model, apiKey)
   }
 
