@@ -78,7 +78,7 @@ class AutropyPlugin {
   // ---------------------------------------------------------------------------
   async #runAnalysis () {
     let { logger } = this.context
-    let { provider, model, apiKey, port, prompt, suggestMetadata } = this.options
+    let { model, apiKey, port, prompt, suggestMetadata } = this.options
 
     // CONFIRMED: tropy global and Redux state are available in the renderer process
     let state
@@ -124,8 +124,8 @@ class AutropyPlugin {
       const imageBuffer = readFileSync(photo.path)
       const base64 = imageBuffer.toString('base64')
 
-      logger.warn(`[AUTROPY] calling ${provider}/${model}...`)
-      const result = await analyzeImage(base64, finalPrompt, provider, model, apiKey)
+      logger.warn(`[AUTROPY] calling model: ${model}...`)
+      const result = await analyzeImage(base64, finalPrompt, model, apiKey)
       logger.warn(`[AUTROPY] analysis complete — confidence ${result.confidence}`)
 
       // Stash state for use by panel event handlers
@@ -415,8 +415,6 @@ class AutropyPlugin {
 // ---------------------------------------------------------------------------
 
 AutropyPlugin.defaults = {
-  instanceName: '',
-  provider: '',
   model: '',
   apiKey: '',
   port: 2029,

@@ -13,22 +13,8 @@
   },
   "options": [
     {
-      "field": "instanceName",
-      "label": "Name",
-      "type": "string",
-      "default": "",
-      "required": false
-    },
-    {
-      "field": "provider",
-      "label": "AI Provider",
-      "type": "string",
-      "default": "",
-      "required": true
-    },
-    {
       "field": "model",
-      "label": "Model",
+      "label": "Model ID (e.g. gemini-2.5-flash, gpt-4o, claude-opus-4-6)",
       "type": "string",
       "default": "",
       "required": true

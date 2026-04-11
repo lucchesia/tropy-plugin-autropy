@@ -219,36 +219,36 @@ async function callAnthropic (base64, prompt, model, apiKey) {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-// CONFIRMED: provider routing is prefix-based on the provider field string.
-// CONFIRMED: local/OpenAI-compatible fallback uses the configured port via
-//   the baseUrl — callers must pass `http://localhost:${port}/v1` when routing
-//   to a local model. Port is not a concern of api.js — plugin.js resolves it.
-// UNVERIFIED ASSUMPTION: local endpoints (Ollama, LM Studio) support the
-//   OpenAI /chat/completions shape with vision. Not all local models do.
-export async function analyzeImage (base64, prompt, provider, model, apiKey, localBaseUrl) {
+// Provider is auto-detected from the model ID prefix — no separate provider field needed.
+// Detection rules (case-insensitive):
+//   gemini-*          → Google Gemini API
+//   gpt-*, o1, o3, o4 → OpenAI API
+//   claude-*          → Anthropic API
+//   anything else     → OpenAI-compatible local endpoint (Ollama, LM Studio, etc.)
+//                       requires localBaseUrl to be passed
+export async function analyzeImage (base64, prompt, model, apiKey, localBaseUrl) {
   if (!base64) throw new Error('[AUTROPY] analyzeImage called with no image data')
   if (!prompt) throw new Error('[AUTROPY] analyzeImage called with no prompt')
   if (!model) throw new Error('[AUTROPY] analyzeImage called with no model')
 
-  // Normalize to lowercase so "Google", "Gemini", "GPT", "Claude" all route correctly
-  const p = provider.toLowerCase()
+  const m = model.toLowerCase()
 
-  if (p.startsWith('gemini') || p.startsWith('google')) {
+  if (m.startsWith('gemini')) {
     return callGemini(base64, prompt, model, apiKey)
   }
 
-  if (p.startsWith('gpt') || p.startsWith('openai')) {
+  if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4') || m.startsWith('openai')) {
     return callOpenAI(base64, prompt, model, apiKey)
   }
 
-  if (p.startsWith('claude') || p.startsWith('anthropic')) {
+  if (m.startsWith('claude')) {
     return callAnthropic(base64, prompt, model, apiKey)
   }
 
   // Fallback: treat as OpenAI-compatible local endpoint (Ollama, LM Studio, etc.)
   // UNVERIFIED ASSUMPTION: localBaseUrl is passed correctly by plugin.js.
   if (!localBaseUrl) {
-    throw new Error(`[AUTROPY] Unknown provider "${provider}" and no localBaseUrl provided for local fallback`)
+    throw new Error(`[AUTROPY] Unrecognized model "${model}". Use a model ID starting with gemini-, gpt-, o1/o3/o4, or claude-. For local models, configure a port.`)
   }
   return callOpenAI(base64, prompt, model, apiKey, localBaseUrl)
 }
