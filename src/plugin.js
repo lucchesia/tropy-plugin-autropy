@@ -50,6 +50,7 @@ class AutropyPlugin {
   #state = {}
   #panelInjected = false
   #toolbarInjected = false
+  #domObserver = null  // MutationObserver watching for toolbar DOM to appear
 
   // ---------------------------------------------------------------------------
   // Export hook — menu trigger entry point
@@ -373,27 +374,33 @@ class AutropyPlugin {
   // ---------------------------------------------------------------------------
 
   async load () {
-    // Retry toolbar injection until the esper DOM is ready.
-    // CONFIRMED: load() fires before Tropy has rendered the toolbar — a direct
-    // call to #injectToolbarToggle() at this point finds no .tool-group elements
-    // and silently no-ops. Retry with 500 ms intervals for up to 10 seconds.
-    this.#scheduleToolbarInjection(0)
-  }
-
-  #scheduleToolbarInjection (attempts) {
-    if (this.#toolbarInjected) return
-    if (attempts > 20) {
-      this.context.logger.warn('[AUTROPY] toolbar not injected after 20 attempts — DOM never became ready')
-      return
-    }
+    // CONFIRMED: load() fires before Tropy renders the toolbar. The esper tool-group
+    // only exists when an item with a photo is selected. A fixed retry window is not
+    // sufficient — use a MutationObserver so injection happens the moment the toolbar
+    // appears in the DOM, no matter how long after load() that is.
     this.#injectToolbarToggle()
     if (!this.#toolbarInjected) {
-      setTimeout(() => this.#scheduleToolbarInjection(attempts + 1), 500)
+      this.#domObserver = new MutationObserver(() => {
+        if (this.#toolbarInjected) {
+          this.#domObserver.disconnect()
+          this.#domObserver = null
+          return
+        }
+        this.#injectToolbarToggle()
+        if (this.#toolbarInjected) {
+          this.#domObserver.disconnect()
+          this.#domObserver = null
+        }
+      })
+      this.#domObserver.observe(document.body, { childList: true, subtree: true })
+      this.context.logger.warn('[AUTROPY] toolbar not ready at load() — MutationObserver watching for esper DOM')
     }
   }
 
   async unload () {
     this.controller.abort()
+    this.#domObserver?.disconnect()
+    this.#domObserver = null
     // CONFIRMED: button is wrapped in a new .tool-group — remove the wrapper, not just the btn
     document.getElementById('autropy-toggle')?.closest('.tool-group')?.remove()
     document.getElementById('autropy-panel')?.remove()
