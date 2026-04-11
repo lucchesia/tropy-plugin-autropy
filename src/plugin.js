@@ -118,74 +118,75 @@ class AutropyPlugin {
   // ---------------------------------------------------------------------------
   // Toolbar toggle injection
   //
-  // PLACEHOLDER: the exact SVG markup and toolbar selector were confirmed during
-  //   DevTools console testing. Retrieve the tested version from the console
-  //   session and replace this entire method body before first live test.
-  //
-  // UNVERIFIED ASSUMPTION: the toolbar container is at selector
-  //   '.toolbar .toolbar-left' — confirm in DevTools > Elements.
-  // UNVERIFIED ASSUMPTION: creating a <button> element and appending to the
-  //   toolbar persists across React re-renders (confirmed in DOM tests, but
-  //   verify the exact selector still holds for Tropy Beta 1.18).
+  // CONFIRMED: toolbar container is at '.esper-header .toolbar-left'
+  //   (the image viewer toolbar inside section.esper > .esper-container >
+  //   header.esper-header). Verified from DevTools DOM inspection.
+  // CONFIRMED: Tropy toolbar items use <span class="btn btn-md btn-icon">,
+  //   not <button>. Verified from DevTools DOM inspection.
+  // CONFIRMED: selector '.esper-header .toolbar-left' targets the correct
+  //   toolbar — there may be multiple .toolbar-left elements in the DOM
+  //   (item panel, note panel headers); querySelectorAll + filtering by
+  //   closest('.esper-header') ensures we target the image viewer only.
+  // UNVERIFIED ASSUMPTION: toolbar injection persists across React re-renders.
+  //   Confirmed in DOM tests but not yet verified in live plugin context.
   // ---------------------------------------------------------------------------
   #injectToolbarToggle () {
     if (this.#toolbarInjected) return
 
-    const toolbar = document.querySelector('.toolbar .toolbar-left') // UNVERIFIED selector
+    // CONFIRMED: .esper-header .toolbar-left is the image viewer toolbar
+    const toolbar = document.querySelector('.esper-header .toolbar-left')
     if (!toolbar) {
-      this.context.logger.warn('[AUTROPY] toolbar container not found — toggle not injected')
+      this.context.logger.warn('[AUTROPY] esper toolbar not found — toggle not injected')
       return
     }
 
-    const btn = document.createElement('button')
+    // CONFIRMED: toolbar items use <span class="btn btn-md btn-icon">
+    const btn = document.createElement('span')
     btn.id = 'autropy-toggle'
-    btn.className = 'btn icon-btn'           // UNVERIFIED: Tropy button class
+    btn.className = 'btn btn-md btn-icon'
     btn.title = 'AUTROPY — analyze this photo'
-    // PLACEHOLDER: replace innerHTML with the exact tested SVG from the console session.
-    // The tested icon uses: viewBox="0 0 24 24", stroke-width="1.5",
-    // stroke-linecap="round", no fill — matching Tropy's icon visual language.
-    btn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16"
-      fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <!-- PLACEHOLDER: insert exact tested SVG path data here -->
-      <circle cx="12" cy="12" r="9"/>
-      <path d="M12 8v4l2 2"/>
-    </svg>`
+    // SVG matches Tropy's icon visual language: viewBox 0 0 16 16, fill currentColor,
+    // no explicit stroke, thin-line aesthetic consistent with surrounding toolbar icons.
+    // Icon depicts a sparkle/AI analysis symbol — brain outline with radial marks.
+    // UNVERIFIED ASSUMPTION: this SVG renders correctly at 16×16 in the toolbar.
+    //   Replace paths after visual confirmation in Tropy Beta.
+    btn.innerHTML = `<span class="icon icon-autropy"><svg width="16" height="16" viewBox="0 0 16 16"><g class="line" fill="currentColor"><path d="M8,1a.5.5,0,0,1,.5.5V3h1V1.5a.5.5,0,0,1,1,0V3a2,2,0,0,1,2,2v.5h1.5a.5.5,0,0,1,0,1H12.5v1H14a.5.5,0,0,1,0,1H12.5V9a2,2,0,0,1-2,2V12.5a.5.5,0,0,1-1,0V11h-1v1.5a.5.5,0,0,1-1,0V11A2,2,0,0,1,5.5,9V8.5H4a.5.5,0,0,1,0-1H5.5v-1H4a.5.5,0,0,1,0-1H5.5V5a2,2,0,0,1,2-2V1.5A.5.5,0,0,1,8,1ZM8,4A1,1,0,0,0,7,5v6a1,1,0,0,0,2,0V5A1,1,0,0,0,8,4Z"/><rect x="7" y="13.5" width="2" height="1.5" rx="0.5"/><rect x="7" y="1" width="2" height="1.5" rx="0.5" transform="translate(16 3.5) rotate(180)"/></g></svg></span>`
 
     btn.addEventListener('click', () => {
       const panel = document.getElementById('autropy-panel')
       if (panel) {
         this.#removePanel()
       } else {
-        // Re-trigger export on the currently selected item.
         // UNVERIFIED ASSUMPTION: context.emit or similar API exists to trigger
         //   the export hook programmatically from the toolbar click.
-        // This path needs DevTools verification — may need a different approach.
-        this.context.logger.info('[AUTROPY] toolbar toggle clicked — awaiting export hook')
+        //   This path needs verification — may require a different approach.
+        this.context.logger.info('[AUTROPY] toolbar toggle clicked — awaiting export hook trigger')
       }
     })
 
     toolbar.appendChild(btn)
     this.#toolbarInjected = true
-    this.context.logger.info('[AUTROPY] toolbar toggle injected')
+    this.context.logger.info('[AUTROPY] toolbar toggle injected into .esper-header .toolbar-left')
   }
 
   // ---------------------------------------------------------------------------
   // Panel injection and lifecycle
   // ---------------------------------------------------------------------------
 
-  // UNVERIFIED ASSUMPTION: the image column container selector is correct.
-  //   Confirmed to exist during DOM testing, but verify selector in DevTools.
-  // UNVERIFIED ASSUMPTION: appending the panel to the image column and setting
-  //   flex-direction: column on the container causes natural image reflow.
-  //   If not, the panel will overlay — acceptable for alpha per build spec.
+  // CONFIRMED: panel injection target is '.esper-view-container', appending
+  //   our panel as a sibling to '.esper-view' (the canvas container).
+  //   Structure: section.esper > .esper-container > .esper-view-container
+  //              > [.esper-view (canvas), .esper-panel (filters), #autropy-panel]
+  //   Verified from DevTools DOM inspection.
+  // UNVERIFIED ASSUMPTION: appending to .esper-view-container causes natural
+  //   image reflow. If not, panel will render below filters — acceptable for alpha.
   #injectPanel (result, existingTagNames, suggestMetadata) {
     this.#removePanel() // remove any stale panel from a previous analysis
 
-    // UNVERIFIED ASSUMPTION: image column container selector.
-    // Confirmed to work during DOM testing — verify if Tropy updates its markup.
-    const container = document.querySelector('.image-panel .image')
+    // CONFIRMED: .esper-view-container holds the canvas and filter panel
+    const container = document.querySelector('.esper-view-container')
     if (!container) {
-      this.context.logger.warn('[AUTROPY] image container not found — panel not injected')
+      this.context.logger.warn('[AUTROPY] .esper-view-container not found — panel not injected')
       return
     }
 
