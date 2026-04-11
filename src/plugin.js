@@ -77,6 +77,10 @@ class AutropyPlugin {
   //   tropy.state().photos[id]    → full photo object including .path and .item
   // ---------------------------------------------------------------------------
   async #runAnalysis () {
+    // Retry toolbar injection here — guaranteed to run when Tropy is fully ready
+    // and an item is selected, which is exactly when the esper DOM exists.
+    this.#injectToolbarToggle()
+
     let { logger } = this.context
     let { model, apiKey, port, prompt, suggestMetadata } = this.options
 
@@ -128,11 +132,12 @@ class AutropyPlugin {
       const result = await analyzeImage(base64, finalPrompt, model, apiKey)
       logger.warn(`[AUTROPY] analysis complete — confidence ${result.confidence}`)
 
-      // Stash state for use by panel event handlers
-      this.#state = { itemId, photoId, result, existingTags }
-
-      // Inject the review panel into the Tropy DOM
+      // Inject the review panel into the Tropy DOM.
+      // NOTE: #injectPanel calls #removePanel internally (to clear stale panels),
+      // which resets #state to nulls. Set #state AFTER #injectPanel returns so
+      // the Apply handler can read itemId and photoId correctly.
       this.#injectPanel(result, existingTagNames, suggestMetadata)
+      this.#state = { itemId, photoId, result, existingTags }
     } catch (err) {
       logger.error({ stack: err.stack }, `[AUTROPY] analysis failed: ${err.message}`)
     }
@@ -324,7 +329,7 @@ class AutropyPlugin {
     for (const tagName of acceptedTags) {
       try {
         await applyTag(port, itemId, tagName, existingTags)
-        logger.info(`[AUTROPY] applied tag "${tagName}" to item ${itemId}`)
+        logger.warn(`[AUTROPY] applied tag "${tagName}" to item ${itemId}`)
       } catch (err) {
         logger.warn(
           { stack: err.stack },
@@ -341,7 +346,7 @@ class AutropyPlugin {
       this.options.model,
       AUTROPY_VERSION
     )
-    logger.info(`[AUTROPY] note written to photo ${photoId}`)
+    logger.warn(`[AUTROPY] note written to photo ${photoId}`)
 
     if (Object.keys(acceptedMeta).length > 0) {
       // UNVERIFIED ASSUMPTION: metadata write endpoint exists.
@@ -353,7 +358,7 @@ class AutropyPlugin {
     }
 
     this.#removePanel()
-    logger.info(`[AUTROPY] apply complete — item ${itemId}`)
+    logger.warn(`[AUTROPY] apply complete — item ${itemId}`)
   }
 
   #dismissPanel () {
