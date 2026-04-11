@@ -151,15 +151,13 @@ class AutropyPlugin {
   #injectToolbarToggle () {
     if (this.#toolbarInjected) return
 
-    // CONFIRMED: find esper tool-group by button titles — index is fragile
-    // Portuguese titles are from Anita's instance; English variants included for portability.
+    // CONFIRMED (2026-04-11, DevTools): esper tool-group is group index 10 and contains
+    // "Show full text overlay" — unique to this group. "Maximize this view" also appears
+    // in group 16 (note panel) so is ambiguous; use "Show full text overlay" instead.
     let esperGroup = null
     for (const g of document.querySelectorAll('.tool-group')) {
       const titles = [...g.querySelectorAll('.btn')].map(b => b.title)
-      if (titles.some(t =>
-        t.includes('Maximizar') || t.includes('sobreposição') ||
-        t.includes('Maximize') || t.includes('overlay')
-      )) {
+      if (titles.some(t => t.includes('Show full text overlay') || t.includes('overlay'))) {
         esperGroup = g
         break
       }
