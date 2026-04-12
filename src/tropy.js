@@ -1,14 +1,18 @@
 // tropy.js — Tropy Beta REST API read and write operations
 //
 // CONFIRMED: base URL is http://localhost:<port> (default port 2029).
-// CONFIRMED: all write endpoints use application/x-www-form-urlencoded bodies.
 // CONFIRMED: GET /project/tags returns [{id, name, color, created, modified}, ...]
-// CONFIRMED: POST /project/tags accepts form-urlencoded: name=...&color=...
-// CONFIRMED: POST /project/items/<id>/tags accepts form-urlencoded: tag=<name or id>
+// CONFIRMED: POST /project/notes accepts form-urlencoded: photo=<id>&html=<html>
 // CONFIRMED: GET /project/data/<id> returns metadata keyed by DC URI strings.
-// UNVERIFIED ASSUMPTION: POST /project/notes exists and accepts photo=<id>&html=<html>.
-//   Endpoint is specified in the AUTROPY build spec but not yet confirmed against
-//   a live Tropy 1.18 Beta instance. Verify before testing writeAnalysisNote.
+//
+// TAG WRITE — resolved contradiction (2026-04-12):
+//   Name-based tag application (form-urlencoded tag=<name>) returns 500.
+//   Correct approach: create tag → get numeric ID from response → apply via JSON {"tag": id}.
+//   Confirmed from tropy-mmllm notebook reference implementation.
+//
+// METADATA WRITE — confirmed endpoint (2026-04-12):
+//   POST /project/data/<id> with JSON body, DC URI strings as keys.
+//   Confirmed from tropy-mmllm notebook reference implementation.
 
 const AUTROPY_NOTE_MARKER = '[AUTROPY]'
 
@@ -51,40 +55,48 @@ export async function fetchExistingTags (port) {
 // ---------------------------------------------------------------------------
 // applyTag(port, itemId, tagName, existingTags)
 // ---------------------------------------------------------------------------
-// Finds the tag by name in existingTags. If not found, creates it first.
-// Then POSTs the tag to the item.
+// Finds or creates a tag by name, then applies it to the item using numeric ID.
 //
-// CONFIRMED: POST /project/items/<id>/tags accepts tag=<name or id> (form-urlencoded).
-//   Using name here — simpler and confirmed equivalent to numeric ID for this endpoint.
-// CONFIRMED: POST /project/tags creates a new tag (form-urlencoded: name=...).
-// UNVERIFIED ASSUMPTION: creating a tag that already exists is safe (idempotent or
-//   returns a useful error). If Tropy throws on duplicate, the name-existence check
-//   below prevents it — but only if existingTags was fetched immediately before calling.
+// CONFIRMED (2026-04-12): name-based tag application returns 500.
+//   Must use numeric tag ID in JSON body: {"tag": <id>}.
+// CONFIRMED: POST /project/tags with form-urlencoded name=... creates a tag
+//   and returns the new tag object including its numeric id.
+// CONFIRMED: existing tag lookup prevents duplicate creation.
 export async function applyTag (port, itemId, tagName, existingTags) {
   if (!tagName || typeof tagName !== 'string') {
     throw new Error('[AUTROPY] applyTag called with invalid tagName')
   }
 
-  const exists = Array.isArray(existingTags) &&
-    existingTags.some(t => t.name.toLowerCase() === tagName.toLowerCase())
+  // Find existing tag by name (case-insensitive) to get its numeric ID
+  const existing = Array.isArray(existingTags)
+    ? existingTags.find(t => t.name.toLowerCase() === tagName.toLowerCase())
+    : null
 
-  if (!exists) {
-    // Create the tag — no color specified, Tropy assigns default
+  let tagId = existing?.id
+
+  if (!tagId) {
+    // Create new tag — form-urlencoded, returns tag object with numeric id
     const createRes = await fetch(`${base(port)}/project/tags`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formBody({ name: tagName })
     })
     await requireOk(createRes, `POST /project/tags (create "${tagName}") failed`)
+    const created = await createRes.json()
+    tagId = created?.id
+    if (!tagId) {
+      throw new Error(`[AUTROPY] POST /project/tags returned no id for "${tagName}"`)
+    }
   }
 
-  // Add tag to item — uses tag name, confirmed equivalent to numeric ID
+  // Apply tag to item using numeric ID via JSON body
+  // CONFIRMED: name-based returns 500; numeric ID via JSON is the correct approach
   const applyRes = await fetch(`${base(port)}/project/items/${itemId}/tags`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: formBody({ tag: tagName })
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag: tagId })
   })
-  await requireOk(applyRes, `POST /project/items/${itemId}/tags (tag "${tagName}") failed`)
+  await requireOk(applyRes, `POST /project/items/${itemId}/tags (tag id ${tagId}) failed`)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +134,51 @@ export async function writeAnalysisNote (port, photoId, summary, modelId, versio
     body: formBody({ photo: photoId, html })
   })
   await requireOk(res, `POST /project/notes (photo ${photoId}) failed`)
+}
+
+// ---------------------------------------------------------------------------
+// writeItemMetadata(port, itemId, fields)
+// ---------------------------------------------------------------------------
+// Writes accepted metadata suggestions back to a Tropy item.
+//
+// CONFIRMED (2026-04-12): endpoint is POST /project/data/<id> with JSON body.
+//   Keys are DC namespace URI strings. Values are plain strings.
+//   Confirmed from tropy-mmllm notebook reference implementation.
+//
+// fields: plain object with short names, e.g. { title: "...", date: "1940" }
+// DC_URIS maps those to the full namespace URIs Tropy expects.
+//
+// UNVERIFIED ASSUMPTION: POST /project/data/<id> is idempotent for fields that
+//   already have values — i.e. it updates, not appends. Verify after first write.
+const DC_WRITE_URIS = {
+  title: 'http://purl.org/dc/elements/1.1/title',
+  date: 'http://purl.org/dc/elements/1.1/date',
+  description: 'http://purl.org/dc/elements/1.1/description',
+  creator: 'http://purl.org/dc/elements/1.1/creator',
+  type: 'http://purl.org/dc/elements/1.1/type',
+  coverage: 'http://purl.org/dc/elements/1.1/coverage',
+  rights: 'http://purl.org/dc/elements/1.1/rights'
+}
+
+export async function writeItemMetadata (port, itemId, fields) {
+  if (!fields || typeof fields !== 'object' || Object.keys(fields).length === 0) return
+
+  const payload = {}
+  for (const [key, value] of Object.entries(fields)) {
+    const uri = DC_WRITE_URIS[key]
+    if (uri && value != null && value !== '') {
+      payload[uri] = value
+    }
+  }
+
+  if (Object.keys(payload).length === 0) return
+
+  const res = await fetch(`${base(port)}/project/data/${itemId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+  await requireOk(res, `POST /project/data/${itemId} (metadata write) failed`)
 }
 
 // ---------------------------------------------------------------------------
