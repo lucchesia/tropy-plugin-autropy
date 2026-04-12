@@ -1,8 +1,10 @@
 {
   "name": "tropy-plugin-autropy",
-  "productName": "AUTROPY",
+  "productName": "Autropy",
   "version": "0.1.0-alpha.1",
   "description": "Multimodal AI analysis for Tropy: suggests tags and descriptions with researcher review.",
+  "author": "Anita Lucchesi",
+  "homepage": "https://github.com/lucchesia/tropy-plugin-autropy",
   "main": "index.js",
   "scripts": {
     "build": "rollup -c rollup.config.mjs",

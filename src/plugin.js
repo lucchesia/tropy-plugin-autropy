@@ -58,7 +58,9 @@ class AutropyPlugin {
   #state = {}
   #panelInjected = false
   #toolbarInjected = false
-  #domObserver = null  // MutationObserver watching for toolbar DOM to appear
+  #domObserver = null   // MutationObserver watching for toolbar DOM to appear
+  #storeUnsub = null    // clearInterval handle — watches for item/photo nav changes
+  #analysisCache = new Map()  // photoId → {result, existingTagNames, suggestMetadata} — avoids re-running API per session
 
   // ---------------------------------------------------------------------------
   // Export hook — menu trigger entry point
@@ -116,6 +118,17 @@ class AutropyPlugin {
       return
     }
 
+    // Check in-memory cache — avoid calling the API twice for the same photo
+    // within a single plugin session. Cache is keyed by photoId and cleared on unload.
+    const cached = this.#analysisCache.get(photoId)
+    if (cached) {
+      logger.warn(`[AUTROPY] using cached analysis for photo ${photoId}`)
+      this.#injectPanel(cached.result, cached.existingTagNames, cached.suggestMetadata)
+      this.#state = { itemId, photoId, result: cached.result, existingTags: [] }
+      this.#subscribeNavChanges()  // MUST be called AFTER #state is set
+      return
+    }
+
     logger.warn(`[AUTROPY] starting analysis — item ${itemId}, photo ${photoId}`)
 
     try {
@@ -140,12 +153,18 @@ class AutropyPlugin {
       const result = await analyzeImage(base64, finalPrompt, model, apiKey)
       logger.warn(`[AUTROPY] analysis complete — confidence ${result.confidence}`)
 
+      // Store in cache so toolbar re-clicks and re-triggers don't waste API quota
+      this.#analysisCache.set(photoId, { result, existingTagNames, suggestMetadata })
+
       // Inject the review panel into the Tropy DOM.
       // NOTE: #injectPanel calls #removePanel internally (to clear stale panels),
       // which resets #state to nulls. Set #state AFTER #injectPanel returns so
       // the Apply handler can read itemId and photoId correctly.
+      // NOTE: #subscribeNavChanges MUST also be called AFTER #state is set —
+      // it reads this.#state.itemId/photoId to know what "current" means.
       this.#injectPanel(result, existingTagNames, suggestMetadata)
       this.#state = { itemId, photoId, result, existingTags }
+      this.#subscribeNavChanges()  // AFTER state — avoids immediate panel removal
     } catch (err) {
       logger.error({ stack: err.stack }, `[AUTROPY] analysis failed: ${err.message}`)
     }
@@ -163,7 +182,13 @@ class AutropyPlugin {
   //   - SVG icon (magnifying glass + sparkle) confirmed rendering at 16×16
   // ---------------------------------------------------------------------------
   #injectToolbarToggle () {
-    if (this.#toolbarInjected) return
+    // Verify the DOM element still exists — React re-renders can remove our injected node
+    // while leaving #toolbarInjected = true, which would silently skip re-injection.
+    if (this.#toolbarInjected) {
+      if (document.getElementById('autropy-toggle')) return
+      this.#toolbarInjected = false
+      this.context.logger.warn('[AUTROPY] toolbar toggle was removed from DOM — re-injecting')
+    }
 
     // CONFIRMED (2026-04-11, DevTools): esper tool-group is group index 10 and contains
     // "Show full text overlay" — unique to this group. "Maximize this view" also appears
@@ -186,7 +211,7 @@ class AutropyPlugin {
     const btn = document.createElement('span')
     btn.id = 'autropy-toggle'
     btn.className = 'btn btn-md btn-icon'
-    btn.title = 'AUTROPY — analyze this photo'
+    btn.title = 'Autropy — analyze this photo'
     // CONFIRMED (dom_injection_test_results.md): magnifying glass + sparkle SVG
     // renders correctly at 16×16 in the Tropy Beta toolbar.
     btn.innerHTML = `<span class="icon icon-autropy"><svg width="16" height="16" viewBox="0 0 16 16"><g class="line" fill="currentColor"><path fill-rule="evenodd" d="M6,1a5,5,0,1,0,5,5A5,5,0,0,0,6,1Zm0,8.5A3.5,3.5,0,1,1,9.5,6,3.5,3.5,0,0,1,6,9.5Z"/><path d="M9.2,9.2l5.1,5.1a.5.5,0,0,1-.7.7L8.5,9.9a.5.5,0,0,1,.7-.7Z"/><path d="M6,4.2l.5,1.3L7.8,6l-1.3.5L6,7.8,5.5,6.5,4.2,6l1.3-.5Z"/></g></svg></span>`
@@ -194,10 +219,14 @@ class AutropyPlugin {
     btn.addEventListener('click', () => {
       const panel = document.getElementById('autropy-panel')
       if (panel) {
-        this.#removePanel()
+        // Toggle visibility — do NOT re-analyze, just show/hide the existing result.
+        // Re-analysis only happens when the item changes (handled by #subscribeNavChanges).
+        const hidden = panel.style.display === 'none'
+        panel.style.display = hidden ? '' : 'none'
         return
       }
 
+      // No panel exists for the current item — run analysis
       this.#runAnalysis().catch(err => {
         this.context.logger.error(
           { stack: err.stack },
@@ -259,6 +288,39 @@ class AutropyPlugin {
   }
 
   #wirePanelEvents () {
+    // Keyboard isolation strategy (based on Tropy esper source analysis):
+    //   Esper registers onKeyDown on section.esper via React synthetic events.
+    //   React 17 delegates to the root container; events that stop before reaching
+    //   the root never trigger React handlers.
+    //
+    //   Primary block: stopPropagation + stopImmediatePropagation on the panel div
+    //   stops events from bubbling past #autropy-panel → .esper-container → section.esper.
+    //
+    //   Belt-and-suspenders: same block on the textarea directly, so even if panel
+    //   focus state is ambiguous, key events that originate in the textarea are caught
+    //   at the earliest possible point.
+    //
+    //   Both keydown AND keyup are blocked — Tropy uses keyup for quicktool release.
+    const blockEsper = e => {
+      e.stopPropagation()
+      e.stopImmediatePropagation()
+    }
+
+    const panel = document.getElementById('autropy-panel')
+    if (panel) {
+      panel.addEventListener('keydown', blockEsper)
+      panel.addEventListener('keyup', blockEsper)
+    }
+
+    const summaryTextarea = document.getElementById('autropy-summary')
+    if (summaryTextarea) {
+      summaryTextarea.addEventListener('keydown', blockEsper)
+      summaryTextarea.addEventListener('keyup', blockEsper)
+      // Auto-focus the textarea so the user can edit immediately without clicking.
+      // Without this, focus remains on section.esper and ALL keys trigger Esper shortcuts.
+      summaryTextarea.focus()
+    }
+
     // Chip toggle — flip data-accepted on click
     document.querySelectorAll('.autropy-chip').forEach(chip => {
       chip.addEventListener('click', () => {
@@ -273,11 +335,16 @@ class AutropyPlugin {
       })
     })
 
-    // Metadata row accept buttons
+    // Metadata row accept buttons — toggle true ↔ false on each click.
+    // Button label changes to "Undo" when accepted so the action is reversible.
     document.querySelectorAll('.autropy-meta-row__accept').forEach(btn => {
       btn.addEventListener('click', () => {
         const row = btn.closest('.autropy-meta-row')
-        if (row) row.dataset.accepted = 'true'
+        if (row) {
+          const current = row.dataset.accepted === 'true'
+          row.dataset.accepted = String(!current)
+          btn.textContent = current ? 'Accept' : 'Undo'
+        }
       })
     })
 
@@ -299,6 +366,40 @@ class AutropyPlugin {
     if (dismissBtn) {
       dismissBtn.addEventListener('click', () => this.#dismissPanel())
     }
+  }
+
+  // Poll tropy.state() to detect item/photo navigation changes.
+  // When the user switches to a different item or photo while the panel is
+  // open, auto-close it so stale analysis from the previous item is never
+  // visible on the new item (Bug 1 — data integrity).
+  //
+  // IMPORTANT: must be called AFTER this.#state is set in #runAnalysis.
+  //   If called earlier (e.g. from inside #injectPanel), this.#state.itemId is null
+  //   and the poll immediately fires a mismatch on the first tick, removing the panel.
+  //
+  // Uses tropy.state() polling (confirmed available) rather than tropy.store.subscribe
+  // (availability unverified). Polls every 300ms — acceptable lag for navigation UX.
+  #subscribeNavChanges () {
+    this.#storeUnsub?.()
+    this.#storeUnsub = null
+
+    const { itemId, photoId } = this.#state
+    if (!itemId && !photoId) return  // nothing to watch — state not set yet
+
+    const interval = setInterval(() => {
+      try {
+        const nav = tropy.state()?.nav // eslint-disable-line no-undef
+        if (!nav) return
+        if (nav.items?.[0] !== itemId || nav.photo !== photoId) {
+          this.context.logger.warn('[AUTROPY] navigation changed — closing stale panel')
+          this.#removePanel()
+        }
+      } catch {
+        clearInterval(interval)  // tropy.state() gone (e.g. plugin unloading)
+      }
+    }, 300)
+
+    this.#storeUnsub = () => clearInterval(interval)
   }
 
   async #applyAccepted () {
@@ -374,6 +475,8 @@ class AutropyPlugin {
   }
 
   #removePanel () {
+    this.#storeUnsub?.()
+    this.#storeUnsub = null
     document.getElementById('autropy-panel')?.remove()
     this.#panelInjected = false
     this.#state = { itemId: null, photoId: null, result: null, existingTags: [] }
@@ -411,6 +514,9 @@ class AutropyPlugin {
     this.controller.abort()
     this.#domObserver?.disconnect()
     this.#domObserver = null
+    this.#storeUnsub?.()
+    this.#storeUnsub = null
+    this.#analysisCache.clear()
     // CONFIRMED: button is wrapped in a new .tool-group — remove the wrapper, not just the btn
     document.getElementById('autropy-toggle')?.closest('.tool-group')?.remove()
     document.getElementById('autropy-panel')?.remove()
