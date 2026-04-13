@@ -40,26 +40,38 @@ function renderChip (tagName, isExisting) {
 // Metadata suggestions table
 // ---------------------------------------------------------------------------
 
-// Only rendered when suggestMetadata option is enabled.
-// Each row has a field name, suggested value, and per-row Accept checkbox.
-// UNVERIFIED ASSUMPTION: metadata_suggestions keys from the AI response are
-//   always title, date, description. Additional keys rendered as-is if present.
-function renderMetadataTable (metadataSuggestions) {
-  if (!metadataSuggestions || typeof metadataSuggestions !== 'object') return ''
+// Renders the metadata accept/reject table.
+// The document type row is ALWAYS included (not gated by suggestMetadata) because
+// the inferred type is a first-class output of every analysis run.
+// Additional metadata rows (title, date, description) are included only when
+// suggestMetadata is true and the AI returned values for those fields.
+//
+// All rows use data-field matching the DC_WRITE_URIS keys in tropy.js so that
+// #applyAccepted() can write accepted rows without any additional wiring.
+function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
+  const typeRow = `
+      <tr class="autropy-meta-row" data-field="type" data-accepted="false">
+        <td class="autropy-meta-row__field">type</td>
+        <td class="autropy-meta-row__value">${escapeHtml(docType || 'unknown')}</td>
+        <td class="autropy-meta-row__action">
+          <button class="autropy-meta-row__accept">Accept</button>
+        </td>
+      </tr>`
 
-  const rows = Object.entries(metadataSuggestions)
-    .filter(([, value]) => value !== null && value !== undefined)
-    .map(([field, value]) => `
+  let extraRows = ''
+  if (suggestMetadata && metadataSuggestions && typeof metadataSuggestions === 'object') {
+    extraRows = Object.entries(metadataSuggestions)
+      .filter(([, value]) => value !== null && value !== undefined)
+      .map(([field, value]) => `
       <tr class="autropy-meta-row" data-field="${escapeAttr(field)}" data-accepted="false">
         <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
         <td class="autropy-meta-row__value">${escapeHtml(String(value))}</td>
         <td class="autropy-meta-row__action">
-          <button class="autropy-meta-row__accept" data-field="${escapeAttr(field)}">Accept</button>
+          <button class="autropy-meta-row__accept">Accept</button>
         </td>
       </tr>`)
-    .join('')
-
-  if (!rows) return ''
+      .join('')
+  }
 
   return `
     <section class="autropy-section">
@@ -71,7 +83,7 @@ function renderMetadataTable (metadataSuggestions) {
             <th></th>
           </tr>
         </thead>
-        <tbody>${rows}</tbody>
+        <tbody>${typeRow}${extraRows}</tbody>
       </table>
     </section>`
 }
@@ -270,6 +282,75 @@ const PANEL_STYLES = `
     border-color: #5b8dd9;
     color: rgb(255,255,255);
   }
+
+  /* ---------------------------------------------------------------------------
+   * Dark mode overrides
+   * Uses @media (prefers-color-scheme: dark) — works when Tropy follows the OS
+   * theme setting. If Tropy ever gains an independent theme toggle that doesn't
+   * track the OS, a class-based selector will need to be added here too.
+   * Token values chosen to approximate Tropy's dark palette from the screenshot.
+   * UNVERIFIED: exact values — adjust after visual check in Tropy dark mode.
+   * --------------------------------------------------------------------------- */
+  @media (prefers-color-scheme: dark) {
+    #autropy-panel {
+      background: rgb(38,38,38);
+      border-top-color: rgb(60,60,60);
+      color: rgb(204,204,204);
+    }
+
+    .autropy-header {
+      color: rgb(120,120,120);
+    }
+
+    .autropy-summary {
+      background: rgb(26,26,26);
+      border-color: rgb(60,60,60);
+      color: rgb(204,204,204);
+    }
+
+    .autropy-chip--existing {
+      border-color: #5b8dd9;
+      color: #7aaae0;
+      background: transparent;
+    }
+
+    .autropy-chip--new {
+      border-color: #5b8dd9;
+      background: #3a5f8a;
+      color: rgb(220,220,220);
+    }
+
+    .autropy-section {
+      border-top-color: rgb(60,60,60);
+    }
+
+    .autropy-meta-table th {
+      color: rgb(120,120,120);
+      border-bottom-color: rgb(60,60,60);
+    }
+
+    .autropy-meta-row__field {
+      color: rgb(120,120,120);
+    }
+
+    .autropy-meta-row__accept {
+      border-color: rgb(60,60,60);
+      background: rgb(50,50,50);
+      color: rgb(204,204,204);
+    }
+
+    .autropy-btn {
+      border-color: rgb(60,60,60);
+      background: rgb(50,50,50);
+      color: rgb(204,204,204);
+    }
+
+    .autropy-btn--primary {
+      background: #5b8dd9;
+      border-color: #5b8dd9;
+      color: rgb(255,255,255);
+    }
+  }
 </style>`
 
 // ---------------------------------------------------------------------------
@@ -304,9 +385,8 @@ export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
 
   const confidencePct = `${Math.round(confidence * 100)}%`
 
-  const metaSection = suggestMetadata
-    ? renderMetadataTable(metaSuggestions)
-    : ''
+  // Metadata section always rendered (for the type row); extra rows gated by suggestMetadata
+  const metaSection = renderMetadataTable(docType, metaSuggestions, suggestMetadata)
 
   return `
     ${PANEL_STYLES}
