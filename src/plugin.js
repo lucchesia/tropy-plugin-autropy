@@ -190,13 +190,14 @@ class AutropyPlugin {
       this.context.logger.warn('[AUTROPY] toolbar toggle was removed from DOM — re-injecting')
     }
 
-    // CONFIRMED (2026-04-11, DevTools): esper tool-group is group index 10 and contains
-    // "Show full text overlay" — unique to this group. "Maximize this view" also appears
-    // in group 16 (note panel) so is ambiguous; use "Show full text overlay" instead.
+    // Use the icon CSS class as the discriminator — locale-independent.
+    // Previously used button titles ('Show full text overlay') which breaks on
+    // non-English Tropy installs (e.g. Portuguese: 'Exibir sobreposição de texto completa').
+    // .icon-transcription-large is unique to the esper toolbar group that contains
+    // the text overlay, split-view, edit photo, and maximize buttons.
     let esperGroup = null
     for (const g of document.querySelectorAll('.tool-group')) {
-      const titles = [...g.querySelectorAll('.btn')].map(b => b.title)
-      if (titles.some(t => t.includes('Show full text overlay') || t.includes('overlay'))) {
+      if (g.querySelector('.icon-transcription-large, .icon-transcription-split-view')) {
         esperGroup = g
         break
       }
