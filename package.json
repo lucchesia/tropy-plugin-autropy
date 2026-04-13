@@ -44,7 +44,14 @@
     },
     {
       "field": "prompt",
-      "label": "Custom Prompt",
+      "label": "Custom Prompt (replaces analysis instructions; JSON output format is always enforced)",
+      "type": "string",
+      "default": "",
+      "required": false
+    },
+    {
+      "field": "outputLanguage",
+      "label": "Output Language (e.g. Portuguese, French — leave blank for auto)",
       "type": "string",
       "default": "",
       "required": false

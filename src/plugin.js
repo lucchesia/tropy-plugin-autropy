@@ -92,7 +92,7 @@ class AutropyPlugin {
     this.#injectToolbarToggle()
 
     let { logger } = this.context
-    let { model, apiKey, port, prompt, suggestMetadata } = this.options
+    let { model, apiKey, port, prompt, suggestMetadata, outputLanguage } = this.options
 
     // CONFIRMED: tropy global and Redux state are available in the renderer process
     let state
@@ -142,7 +142,7 @@ class AutropyPlugin {
         itemMetadata = await fetchItemMetadata(port, itemId)
       }
 
-      const finalPrompt = buildPrompt(prompt, existingTagNames, itemMetadata)
+      const finalPrompt = buildPrompt(prompt, existingTagNames, itemMetadata, outputLanguage)
 
       // Read image bytes from disk — images are NOT served via the REST API.
       // CONFIRMED: photo.path is the absolute filesystem path to the image file.
@@ -535,7 +535,8 @@ AutropyPlugin.defaults = {
   apiKey: '',
   port: 2029,
   suggestMetadata: false,
-  prompt: ''
+  prompt: '',
+  outputLanguage: ''
 }
 
 module.exports = AutropyPlugin

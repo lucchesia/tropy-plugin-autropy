@@ -45,7 +45,8 @@ Autropy sends the active photo to a multimodal AI model (Gemini, GPT-4o, Claude,
 | API Key | Key for the model provider | _(required)_ |
 | Tropy API Port | Port the Tropy REST API is listening on | `2029` |
 | Suggest Metadata | Also suggest title, date, description fields | `false` |
-| Custom Prompt | Override the default analysis prompt | _(optional)_ |
+| Custom Prompt | Override the default analysis instructions. The JSON output format is always enforced — the model will always return the structured fields Autropy needs, regardless of what you write here. | _(optional)_ |
+| Output Language | Language for prose output (summary, metadata values). E.g. `Portuguese`, `French`. Leave blank to let the model choose based on document content. JSON keys and tag strings are always in English. | _(blank = auto)_ |
 
 The provider is auto-detected from the model ID prefix: `gemini-` → Google, `gpt-` / `o1-` / `o3-` / `o4-` → OpenAI, `claude-` → Anthropic. Any other prefix routes to a local model via `localBaseUrl`.
 
