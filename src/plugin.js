@@ -32,7 +32,7 @@ import { buildPanelHTML } from './panel-template.js'
 // Provenance constants — appear in every AUTROPY-generated note.
 // CONFIRMED: format is "[AUTROPY] model: <id> | <ISO timestamp> | v<version>"
 const AUTROPY_NOTE_MARKER = '[AUTROPY]'
-const AUTROPY_VERSION = '0.1.0-alpha.1'
+const AUTROPY_VERSION = '0.1.0-alpha.2'
 
 // ---------------------------------------------------------------------------
 // Plugin class
