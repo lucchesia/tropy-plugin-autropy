@@ -669,6 +669,16 @@ class AutropyPlugin {
   // ── lifecycle ────────────────────────────────────────────────────────────
 
   async load () {
+    // First line in the log, unconditionally, before anything can fail.
+    //
+    // This exists because of a real debugging dead end: a stale build stayed
+    // installed after a rebuild, and the log gave no way to tell which version
+    // was running — so identical symptoms looked like the fix had not worked.
+    // Whatever else happens, the log now says what is actually loaded.
+    this.context.logger.warn(
+      `[AUTROPY] v${AUTROPY_VERSION} loaded — port ${resolvePort(this.options.port)}, ` +
+      `model "${this.options.model || '(not set)'}"`)
+
     // load() runs before Tropy renders the toolbar, and the esper tool group
     // only exists once an item with a photo is selected — which may be much
     // later. A MutationObserver injects the moment it appears.

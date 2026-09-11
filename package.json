@@ -9,7 +9,8 @@
   "scripts": {
     "build": "rollup -c rollup.config.mjs",
     "watch": "rollup -c rollup.config.mjs --watch",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "install-local": "bash scripts/install-local.sh"
   },
   "hooks": {
     "export": true
