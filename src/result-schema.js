@@ -38,23 +38,62 @@ export function normalizeTags (tags) {
   return out
 }
 
+// The fields the JSON format block actually asks the model for. A field the
+// prompt never requested is not "missing", so it is not reported as suppressed.
+export const REQUESTED_METADATA_FIELDS = ['title', 'date', 'description']
+
+// Why a requested field produced no row.
+export const DECLINED = 'declined'      // the model answered null or blank
+export const ABSENT = 'absent'          // the model omitted the key entirely
+export const UNWRITABLE = 'unwritable'  // Autropy cannot write that field
+
 // Only fields Autropy can actually write are kept — anything else would render
 // as an accept row that silently does nothing on apply.
+//
+// What is dropped is now reported rather than discarded. A field the model
+// declined and a field the model failed on look identical in a panel that shows
+// only what came back, and they call for opposite responses: the first is the
+// prompt working as designed — it tells the model not to duplicate values the
+// item already holds — and the second is worth re-running.
 function normalizeMetadataSuggestions (suggestions) {
+  const suppressed = []
+
   if (!suggestions || typeof suggestions !== 'object' || Array.isArray(suggestions)) {
-    return null
+    return {
+      suggestions: null,
+      suppressed: REQUESTED_METADATA_FIELDS.map(field => ({ field, reason: ABSENT }))
+    }
   }
 
   const out = {}
-  for (const [field, value] of Object.entries(suggestions)) {
-    if (!(field in DC_WRITE_URIS)) continue
-    if (value == null) continue
 
-    const text = String(value).trim()
-    if (text) out[field] = text
+  for (const [field, value] of Object.entries(suggestions)) {
+    if (!(field in DC_WRITE_URIS)) {
+      suppressed.push({ field, reason: UNWRITABLE })
+      continue
+    }
+
+    // Models asked for JSON null answer with the string "null" often enough to
+    // matter, and a literal "null" in dc:date is worse than no suggestion.
+    const text = value == null ? '' : String(value).trim()
+    if (!text || text.toLowerCase() === 'null') {
+      suppressed.push({ field, reason: DECLINED })
+      continue
+    }
+
+    out[field] = text
   }
 
-  return Object.keys(out).length > 0 ? out : null
+  for (const field of REQUESTED_METADATA_FIELDS) {
+    if (field in out) continue
+    if (suppressed.some(s => s.field === field)) continue
+    suppressed.push({ field, reason: ABSENT })
+  }
+
+  return {
+    suggestions: Object.keys(out).length > 0 ? out : null,
+    suppressed
+  }
 }
 
 // `confidence` is displayed as a percentage. A non-number or out-of-range value
@@ -84,11 +123,14 @@ export function validateResult (parsed) {
     ? parsed.document_type.trim()
     : 'unknown'
 
+  const metadata = normalizeMetadataSuggestions(parsed.metadata_suggestions)
+
   return {
     summary,
     document_type: docType,
     possible_tags: normalizeTags(parsed.possible_tags),
-    metadata_suggestions: normalizeMetadataSuggestions(parsed.metadata_suggestions),
+    metadata_suggestions: metadata.suggestions,
+    suppressed: metadata.suppressed,
     confidence: normalizeConfidence(parsed.confidence)
   }
 }

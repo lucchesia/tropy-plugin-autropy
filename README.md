@@ -21,6 +21,30 @@ From the review panel you can:
 
 Nothing is written to your project until you press **Apply accepted**.
 
+### Comparing models
+
+Set **Other model IDs to offer** in Preferences and the review panel gains a model picker. Pick one
+and press **Re-analyze** to read the same document with a different model.
+
+A model you have already run on this item is marked *already run*: switching back to it is instant
+and costs nothing, so you can hold two readings of the same page side by side.
+
+Every model in that list must come from the same provider as your Model ID. There is only one API
+key, and Autropy will not send an Anthropic key to OpenAI. Entries it refuses — wrong provider, or a
+display name like `Claude Opus 5` instead of `claude-opus-5` — are named in the log at startup with
+the reason.
+
+### When the model says nothing
+
+A field the model returned nothing for is now shown greyed out with the reason, rather than simply
+missing. Most often it reads *left alone — this item already has a value*: the prompt tells the model
+not to duplicate metadata your item already holds, so a second run can legitimately suggest **less**
+than the first. That is the prompt working, not a failure.
+
+If a suggestion would overwrite something, the row says **replaces: <your current value>**. Tropy
+keeps one value per field, so accepting it is a replacement — worth knowing before the click rather
+than after.
+
 ### After you apply
 
 Once something has been written, the panel becomes a **receipt** rather than a form. Re-opening it

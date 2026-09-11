@@ -21,7 +21,7 @@ import { readFile } from 'node:fs/promises'
 // in four places and had already drifted (the installed build said alpha.1
 // while the repo said alpha.2), which corrupts note provenance.
 import { version as AUTROPY_VERSION } from '../package.json'
-import { analyzeImage } from './api.js'
+import { analyze, resolveModelChoices } from './api.js'
 import { isItemMode, isProjectMode, itemModeAction } from './nav.js'
 import {
   ACKNOWLEDGED,
@@ -32,7 +32,7 @@ import {
 } from './gateway.js'
 import { readPhotoUnprocessed, renderPhoto } from './image.js'
 import { buildPrompt } from './prompt.js'
-import { buildPanelHTML, renderStatusLines } from './panel-template.js'
+import { PANEL_STYLES, buildPanelHTML, renderStatusLines } from './panel-template.js'
 import { escapeHtml, textToParagraphs } from './html.js'
 import {
   ACKNOWLEDGED as OP_ACKNOWLEDGED,
@@ -245,6 +245,30 @@ class AutropyPlugin {
     }
   }
 
+  // ── models ───────────────────────────────────────────────────────────────
+
+  // The models the panel may offer. Rejections are reported once, at load, so a
+  // typo or a cross-provider entry is visible without waiting for a run.
+  #models () {
+    const { models, rejected } = resolveModelChoices(this.options.model, this.options.models)
+
+    for (const { model, reason } of rejected) {
+      this.context.logger.warn(`[AUTROPY] not offering "${model}": ${reason}`)
+    }
+
+    return models
+  }
+
+  // Marks which of them have already been run on this item, so the picker can
+  // say which switches are free.
+  #modelChoices (run) {
+    return this.#models().map(model => ({
+      model,
+      cached: this.#runs.has(
+        runCacheKey({ projectPath: run.projectPath, itemId: run.itemId, model }))
+    }))
+  }
+
   #gatewayFor (projectPath, port) {
     if (this.#gateway?.projectPath === projectPath && this.#gateway?.port === port) {
       return this.#gateway
@@ -271,11 +295,12 @@ class AutropyPlugin {
 
   // ── analysis ─────────────────────────────────────────────────────────────
 
-  async #runAnalysis ({ force = false } = {}) {
+  async #runAnalysis ({ force = false, model: requested = null } = {}) {
     this.#injectToolbarToggle()
 
     const { logger } = this.context
-    const { model, apiKey, prompt, suggestMetadata, outputLanguage } = this.options
+    const { apiKey, prompt, suggestMetadata, outputLanguage } = this.options
+    const model = requested || this.options.model
     const port = resolvePort(this.options.port)
 
     // One analysis at a time. Without this, impatient clicks before the panel
@@ -336,6 +361,7 @@ class AutropyPlugin {
     const runId = ++this.#runCounter
     const controller = new AbortController()
     this.#activeRun = { id: runId, controller, itemId, photoId }
+    this.#setToolbarBusy(true)
     this.#watchNav()
 
     logger.warn(
@@ -389,6 +415,7 @@ class AutropyPlugin {
 
       if (cached) {
         logger.warn(`[AUTROPY] reusing a paid-for analysis of photo ${photoId}`)
+        run.servedModel = cached.servedModel
         setResult(run, photoId, cached)
         this.#openPanel(run, photoId)
         return
@@ -407,13 +434,17 @@ class AutropyPlugin {
         `[AUTROPY] calling model: ${model} — ${Math.round(scan.bytes / 1024)} KB ` +
         `${scan.mediaType}${photo.page > 0 ? `, page ${photo.page + 1}` : ''}`)
 
-      const result = await analyzeImage(scan.base64, finalPrompt, model, apiKey, {
-        mediaType: scan.mediaType,
+      const { result, servedModel } = await analyze({
+        model,
+        prompt: finalPrompt,
+        apiKey,
+        image: { base64: scan.base64, mediaType: scan.mediaType },
         signal: controller.signal
       })
 
       logger.warn(
-        `[AUTROPY] analysis complete — confidence ${result.confidence ?? 'not reported'}`)
+        `[AUTROPY] analysis complete — confidence ${result.confidence ?? 'not reported'}` +
+        (servedModel && servedModel !== model ? `, served by ${servedModel}` : ''))
 
       // The run may have been superseded while the model was working. Showing
       // it now would put one photo's analysis over a different photo.
@@ -428,7 +459,11 @@ class AutropyPlugin {
         return
       }
 
-      this.#photoCache.set(cacheKey, { result })
+      // What the provider says it actually ran, which can differ from the ID
+      // asked for when that ID is an alias. Provenance should record what ran.
+      run.servedModel = servedModel
+
+      this.#photoCache.set(cacheKey, { result, servedModel })
       setResult(run, photoId, { result })
       this.#openPanel(run, photoId)
     } catch (err) {
@@ -442,7 +477,22 @@ class AutropyPlugin {
       this.#fatal('Autropy could not analyze this photo', err.message)
     } finally {
       if (this.#activeRun?.id === runId) this.#activeRun = null
+      if (!this.#activeRun) this.#setToolbarBusy(false)
     }
+  }
+
+  // A model call takes ten to twenty seconds and, until the panel appears, the
+  // only thing on screen is an unchanged toolbar. Anita clicked the icon five
+  // times in five seconds waiting for it — every one of them correctly refused,
+  // and none of them visibly acknowledged.
+  #setToolbarBusy (busy) {
+    const btn = document.getElementById('autropy-toggle')
+    if (!btn) return
+
+    btn.classList.toggle('autropy-toggle--busy', busy)
+    btn.title = busy
+      ? 'Autropy — analyzing this photo…'
+      : 'Autropy — analyze this photo'
   }
 
   // Runs a prompt-enriching read, downgrading failure to a notice on the run.
@@ -529,6 +579,18 @@ class AutropyPlugin {
 
   // ── panel ────────────────────────────────────────────────────────────────
 
+  // Injected at load rather than with the first panel: the toolbar icon needs
+  // the busy style long before a panel exists.
+  #injectStyles () {
+    if (document.getElementById('autropy-styles')) return
+
+    const wrapper = document.createElement('div')
+    wrapper.innerHTML = PANEL_STYLES
+
+    const style = wrapper.querySelector('style')
+    if (style) document.head.appendChild(style)
+  }
+
   // Injects into `.esper-container` (stable across React re-renders) as an
   // absolutely positioned child. Injecting as a flex sibling breaks the layout.
   #injectPanel (run, photoId) {
@@ -567,21 +629,21 @@ class AutropyPlugin {
       container.style.position = 'relative'
     }
 
+    this.#injectStyles()
+
     const wrapper = document.createElement('div')
     wrapper.innerHTML = buildPanelHTML({
       run,
       photoId,
       existingTagNames: run.existingTagNames || [],
-      suggestMetadata: run.suggestMetadata ?? this.options.suggestMetadata
+      suggestMetadata: run.suggestMetadata ?? this.options.suggestMetadata,
+      modelChoices: this.#modelChoices(run)
     })
-
-    if (!document.getElementById('autropy-styles')) {
-      document.head.appendChild(wrapper.querySelector('style'))
-    }
 
     const panel = wrapper.querySelector('#autropy-panel')
     container.appendChild(panel)
     this.#panelInjected = true
+    this.#setToolbarBusy(!!this.#activeRun)
 
     this.#wirePanelEvents(panel, run, photoId)
 
@@ -677,10 +739,30 @@ class AutropyPlugin {
     })
 
     panel.querySelector('#autropy-reanalyze')?.addEventListener('click', () => {
-      this.#runAnalysis({ force: true }).catch(err => {
+      const model = panel.querySelector('#autropy-model')?.value || run.model
+      this.#runAnalysis({ force: true, model }).catch(err => {
         this.context.logger.error(
           { stack: err.stack }, `[AUTROPY] re-analysis failed: ${err.message}`)
       })
+    })
+
+    // Switching to a model already run on this item replays it for nothing;
+    // switching to an unrun one costs a call, so it is not done on selection —
+    // Re-analyze is the button that spends money, and it uses what is selected.
+    panel.querySelector('#autropy-model')?.addEventListener('change', e => {
+      const model = e.target.value
+      if (model === run.model) return
+
+      const key = runCacheKey({
+        projectPath: run.projectPath, itemId: run.itemId, model
+      })
+      const other = this.#runs.get(key)
+
+      if (other && photoEntry(other, photoId)?.status === 'done') {
+        this.context.logger.warn(
+          `[AUTROPY] switching to run ${other.id} (${model}) — no new request`)
+        this.#openPanel(other, photoId)
+      }
     })
 
     panel.querySelector('#autropy-dismiss')?.addEventListener('click', () => {
@@ -941,8 +1023,15 @@ class AutropyPlugin {
     //
     // The run id is here so an `unknown` write can be found by hand — it is the
     // one outcome Autropy refuses to resolve on the researcher's behalf.
+    // The served model is recorded only when it differs from the one asked for,
+    // which happens when the configured ID is an alias. Saying both is the
+    // honest record: one is what the researcher chose, the other is what ran.
+    const served = (run.servedModel && run.servedModel !== run.model)
+      ? ` (served ${run.servedModel})`
+      : ''
+
     const provenance =
-      `${AUTROPY_NOTE_MARKER} model: ${run.model} | ` +
+      `${AUTROPY_NOTE_MARKER} model: ${run.model}${served} | ` +
       `${new Date().toISOString()} | v${AUTROPY_VERSION} | run ${run.id}`
 
     return `${body}<p>---<br>${escapeHtml(provenance)}</p>`
@@ -1021,6 +1110,8 @@ class AutropyPlugin {
         document.addEventListener('DOMContentLoaded', resolve, { once: true }))
     }
 
+    this.#injectStyles()
+
     // load() runs before Tropy renders the toolbar, and the esper tool group
     // only exists once an item with a photo is selected — which may be much
     // later. A MutationObserver injects the moment it appears.
@@ -1084,6 +1175,7 @@ class AutropyPlugin {
 
 AutropyPlugin.defaults = {
   model: '',
+  models: '',
   apiKey: '',
   port: DEFAULT_PORT,
   suggestMetadata: false,

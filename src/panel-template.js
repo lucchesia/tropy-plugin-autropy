@@ -16,6 +16,7 @@
 //   inside .esper-container. max-height:60% prevents panel from eclipsing the full image
 
 import { escapeAttr, escapeHtml } from './html.js'
+import { ABSENT, UNWRITABLE } from './result-schema.js'
 import {
   UNCERTAIN,
   appliedSummary,
@@ -126,7 +127,36 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
       .join('')
   }
 
-  if (!typeRow && !extraRows) return ''
+  // Fields the prompt asked for that produced nothing. Shown, muted and without
+  // an Accept button, because "the model declined" and "the model failed" look
+  // identical in a panel that only lists what came back — and they call for
+  // opposite responses. The declined case is usually the prompt working as
+  // designed: it tells the model not to duplicate values the item already holds,
+  // which is why a second run with a different model can return fewer fields
+  // than the first.
+  let suppressedRows = ''
+  if (suggestMetadata && Array.isArray(result.suppressed)) {
+    suppressedRows = result.suppressed.map(({ field, reason }) => {
+      const held = current[field]
+      const explanation = reason === UNWRITABLE
+        ? 'Autropy cannot write this field'
+        : (held != null && String(held).trim())
+            ? 'left alone — this item already has a value'
+            : reason === ABSENT
+              ? 'the model did not return this field'
+              : 'the model had nothing to suggest'
+
+      return `
+      <tr class="autropy-meta-row autropy-meta-row--suppressed" data-field="${
+  escapeAttr(field)}">
+        <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
+        <td class="autropy-meta-row__value">${escapeHtml(explanation)}</td>
+        <td class="autropy-meta-row__action"></td>
+      </tr>`
+    }).join('')
+  }
+
+  if (!typeRow && !extraRows && !suppressedRows) return ''
 
   return `
     <section class="autropy-section">
@@ -143,7 +173,7 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
             <th></th>
           </tr>
         </thead>
-        <tbody>${typeRow}${extraRows}</tbody>
+        <tbody>${typeRow}${extraRows}${suppressedRows}</tbody>
       </table>
     </section>`
 }
@@ -195,6 +225,14 @@ export const PANEL_STYLES = `
     font-size: 13px;                        /* CONFIRMED from DevTools */
     color: rgb(34,34,34);                   /* CONFIRMED from DevTools */
     box-sizing: border-box;
+  }
+
+  /* The toolbar icon while a model call is in flight. A run takes ten to twenty
+   * seconds and the panel does not exist yet, so without this the only feedback
+   * for a click is a log line nobody is watching. */
+  .autropy-toggle--busy {
+    opacity: 0.45;
+    cursor: progress;
   }
 
   .autropy-header {
@@ -382,6 +420,13 @@ export const PANEL_STYLES = `
   /* Shown under a suggestion that would overwrite an existing value. Tropy keeps
    * one value per property, so accepting such a row is a replacement, and the
    * old value is not recoverable from the panel afterwards. */
+  /* A field the prompt asked for that produced nothing. Present so the absence
+   * is legible, muted so it cannot be mistaken for a suggestion. */
+  .autropy-meta-row--suppressed .autropy-meta-row__value {
+    color: rgb(128,128,128); /* UNVERIFIED: muted text */
+    font-style: italic;
+  }
+
   .autropy-meta-row__replaces {
     display: block;
     margin-top: 2px;
@@ -418,11 +463,27 @@ export const PANEL_STYLES = `
     bottom: 0;
     z-index: 1;
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
     gap: 6px;
     padding: 8px 0 2px;
     margin-top: auto;
     background: rgb(246,246,246);       /* CONFIRMED from DevTools */
+  }
+
+  /* Pushes the buttons right while leaving the model picker on the left. */
+  .autropy-actions__spacer {
+    flex: 1 1 auto;
+  }
+
+  .autropy-model {
+    max-width: 45%;
+    padding: 3px 4px;
+    font-size: 11px;
+    font-family: system-ui;             /* CONFIRMED from DevTools */
+    border-radius: 3px;
+    border: 1px solid rgb(210,210,210); /* CONFIRMED from DevTools */
+    background: rgb(255,255,255);
+    color: rgb(34,34,34);               /* CONFIRMED from DevTools */
   }
 
   .autropy-btn {
@@ -580,6 +641,12 @@ export const PANEL_STYLES = `
       color: #e0a06a;
     }
 
+    .autropy-model {
+      border-color: rgb(60,60,60);
+      background: rgb(50,50,50);
+      color: rgb(204,204,204);
+    }
+
     .autropy-status__line--ok .autropy-status__mark { color: #7cc98a; }
     .autropy-status__line--warn .autropy-status__mark { color: #e0a06a; }
     .autropy-status__line--unknown .autropy-status__mark { color: #e88b8b; }
@@ -649,7 +716,9 @@ function renderAppliedBanner (run) {
 //
 // Results have already passed validateResult(), so possible_tags is an array and
 // confidence is either a number in 0–1 or null.
-export function buildPanelHTML ({ run, photoId, existingTagNames, suggestMetadata }) {
+export function buildPanelHTML ({
+  run, photoId, existingTagNames, suggestMetadata, modelChoices = []
+}) {
   const entry = photoEntry(run, photoId)
   const result = entry?.result ?? {}
   const {
@@ -686,7 +755,22 @@ export function buildPanelHTML ({ run, photoId, existingTagNames, suggestMetadat
     ? `<button class="autropy-btn" id="autropy-dismiss">Close</button>
         <button class="autropy-btn autropy-btn--primary" id="autropy-reanalyze">Re-analyze</button>`
     : `<button class="autropy-btn" id="autropy-dismiss">Dismiss</button>
+        <button class="autropy-btn" id="autropy-reanalyze">Re-analyze</button>
         <button class="autropy-btn autropy-btn--primary" id="autropy-apply">Apply accepted</button>`
+
+  // Offered only when there is more than one model to choose between, so the
+  // ordinary single-model panel is unchanged.
+  //
+  // Switching to a model already run on this photo costs nothing and bills
+  // nothing — the picker doubles as a way to compare two readings of the same
+  // document side by side, which is why cached entries say so.
+  const picker = (modelChoices?.length > 1)
+    ? `<select id="autropy-model" class="autropy-model" title="Analyze with a different model">${
+      modelChoices.map(({ model, cached }) => `<option value="${escapeAttr(model)}"${
+        model === run.model ? ' selected' : ''}>${escapeHtml(model)}${
+        cached && model !== run.model ? ' · already run' : ''}</option>`).join('')
+    }</select>`
+    : ''
 
   return `
     ${PANEL_STYLES}
@@ -713,6 +797,8 @@ export function buildPanelHTML ({ run, photoId, existingTagNames, suggestMetadat
       <div class="autropy-status" id="autropy-status"></div>
 
       <div class="autropy-actions">
+        ${picker}
+        <span class="autropy-actions__spacer"></span>
         ${actions}
       </div>
     </div>`

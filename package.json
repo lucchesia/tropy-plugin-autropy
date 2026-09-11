@@ -1,7 +1,7 @@
 {
   "name": "tropy-plugin-autropy",
   "productName": "Autropy",
-  "version": "0.1.0-alpha.4",
+  "version": "0.2.0-alpha.1",
   "description": "Multimodal AI analysis for Tropy: suggests tags and descriptions with researcher review.",
   "author": "Anita Lucchesi",
   "homepage": "https://github.com/lucchesia/tropy-plugin-autropy",
@@ -23,6 +23,14 @@
       "default": "",
       "required": true,
       "hint": "The provider's API identifier, not its display name — claude-sonnet-5, not \"Claude Sonnet 5\"."
+    },
+    {
+      "field": "models",
+      "label": "Other model IDs to offer (comma-separated)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "hint": "Adds a model picker to the review panel. They must be from the same provider as the Model ID above — there is only one API key, and Autropy will not send it to another provider."
     },
     {
       "field": "apiKey",
