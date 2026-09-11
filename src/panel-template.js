@@ -18,15 +18,21 @@
 import { escapeAttr, escapeHtml } from './html.js'
 import { ABSENT, UNWRITABLE } from './result-schema.js'
 import {
+  SYNTHESIS,
   UNCERTAIN,
   appliedSummary,
+  canSynthesize,
   isFieldAccepted,
   isLocked,
   isMultiPhoto,
+  isSynthesisFieldAccepted,
+  isSynthesisStale,
   isTagAccepted,
   photoEntry,
   photoIndex,
   progressLabel,
+  synthesisNotePhoto,
+  synthesisSources,
   uncertainOperations
 } from './run.js'
 
@@ -83,11 +89,16 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
   // was written. So in a multi-page run the per-page analyses contribute notes
   // and tags only, and item metadata comes from the item summary instead.
   if (isMultiPhoto(run)) {
+    const where = canSynthesize(run)
+      ? 'Open <strong>Item summary</strong> at the end of the pages to write one ' +
+        'description for the whole item.'
+      : 'Metadata comes from the item summary, which needs at least two analyzed pages.'
+
     return `
     <section class="autropy-section">
       <p class="autropy-note">Each page contributes its own note and tags. Metadata
-      describes the whole item, not one page, so it is not suggested per page —
-      the item summary is where it will come from.</p>
+      describes the whole item, not one page, so it is not suggested per page.
+      ${where}</p>
     </section>`
   }
 
@@ -308,6 +319,28 @@ export const PANEL_STYLES = `
     font-size: 11px;
     line-height: 1.45;
     color: rgb(128,128,128); /* UNVERIFIED: muted text */
+  }
+
+  /* A synthesis whose sources changed under it. Not muted: acting on it would
+   * write a description that no longer follows from the pages. */
+  .autropy-warning {
+    margin: 0;
+    padding: 5px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #8a4a1e;
+    background: rgb(250,238,228);
+    border: 1px solid #e0a06a;
+  }
+
+  .autropy-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: rgb(128,128,128); /* UNVERIFIED: muted text */
+    user-select: none;
   }
 
   .autropy-summary {
@@ -706,8 +739,15 @@ export const PANEL_STYLES = `
     }
 
     .autropy-pager,
-    .autropy-note {
+    .autropy-note,
+    .autropy-check {
       color: rgb(120,120,120);
+    }
+
+    .autropy-warning {
+      color: #f0c9a8;
+      background: rgb(58,44,34);
+      border-color: #8a5a2e;
     }
 
     .autropy-status__line--ok .autropy-status__mark { color: #7cc98a; }
@@ -732,32 +772,166 @@ export const PANEL_STYLES = `
 // The buttons move Tropy's own photo selection, not just this panel's view:
 // reviewing page 3 while the image viewer still shows page 1 would be a good way
 // to approve the wrong description.
-function renderPager (run, photoId) {
+function renderPager (run, view) {
   if (!isMultiPhoto(run)) return ''
 
-  const i = photoIndex(run, photoId)
   const total = run.photos.length
-  const entry = photoEntry(run, photoId)
+  const onSynthesis = view === SYNTHESIS
+  const hasSynthesis = canSynthesize(run)
 
-  const state = {
-    running: 'analyzing…',
-    failed: entry?.error ? `failed: ${entry.error}` : 'failed',
-    skipped: 'not analyzed',
-    idle: 'waiting'
-  }[entry?.status] || ''
+  // The item summary sits after the last page, as one more step, so reaching it
+  // is the same gesture as turning to it.
+  const i = onSynthesis ? total : photoIndex(run, view)
+  const last = hasSynthesis ? total : total - 1
+
+  const entry = onSynthesis ? null : photoEntry(run, view)
+
+  const state = onSynthesis
+    ? (isSynthesisStale(run)
+        ? 'a page summary changed since this was written'
+        : (run.synthesis ? '' : 'not written yet'))
+    : ({
+        running: 'analyzing…',
+        failed: entry?.error ? `failed: ${entry.error}` : 'failed',
+        skipped: 'not analyzed',
+        idle: 'waiting'
+      }[entry?.status] || '')
+
+  const position = onSynthesis
+    ? 'Item summary'
+    : `Page ${i + 1} of ${total}`
 
   return `
       <div class="autropy-pager">
         <button class="autropy-pager__step" id="autropy-prev"${
-  i <= 0 ? ' disabled' : ''} title="Previous page">&#9664;</button>
-        <span class="autropy-pager__position">Page ${i + 1} of ${total}</span>
+  i <= 0 ? ' disabled' : ''} title="Previous">&#9664;</button>
+        <span class="autropy-pager__position">${escapeHtml(position)}</span>
         <button class="autropy-pager__step" id="autropy-next"${
-  i >= total - 1 ? ' disabled' : ''} title="Next page">&#9654;</button>
+  i >= last ? ' disabled' : ''} title="Next">&#9654;</button>
         <span class="autropy-pager__state">${escapeHtml(state)}</span>
         <span class="autropy-actions__spacer"></span>
         <span class="autropy-pager__progress" id="autropy-progress">${
   escapeHtml(progressLabel(run))}</span>
       </div>`
+}
+
+// ---------------------------------------------------------------------------
+// The item summary view
+// ---------------------------------------------------------------------------
+
+function renderSynthesis (run) {
+  const locked = isLocked(run)
+  const s = run.synthesis
+  const sources = synthesisSources(run)
+
+  if (!s) {
+    return `
+      <section class="autropy-section">
+        <p class="autropy-note">One description for the whole item, written from the
+        ${sources.length} page summaries as you have left them — including any you have
+        edited. This is one more request to the model.</p>
+      </section>
+      <div class="autropy-status" id="autropy-status"></div>`
+  }
+
+  const stale = isSynthesisStale(run)
+  const confidencePct = s.result?.confidence == null
+    ? ''
+    : `${Math.round(s.result.confidence * 100)}%`
+
+  // Stale means a page summary changed after this was written, so the item
+  // description no longer follows from the pages. Offering to write it anyway
+  // would put a superseded reading into the project.
+  const staleWarning = stale
+    ? `<p class="autropy-warning">A page summary changed after this was written, so it
+       no longer reflects the pages. Generate it again before applying.</p>`
+    : ''
+
+  const incomplete = s.incomplete
+    ? `<p class="autropy-note">Written from ${sources.length} of ${run.photos.length}
+       pages — the rest could not be analyzed.</p>`
+    : ''
+
+  const noteToggle = locked
+    ? ''
+    : `<label class="autropy-check">
+          <input type="checkbox" id="autropy-synthesis-note"${
+  s.accept.note && !stale ? ' checked' : ''}${stale ? ' disabled' : ''}>
+          Also write this as a note on page ${
+  photoIndex(run, synthesisNotePhoto(run)) + 1}
+        </label>`
+
+  return `
+      <div class="autropy-header">
+        <span class="autropy-header__type">item summary</span>
+        <span class="autropy-header__confidence">${confidencePct}</span>
+      </div>
+      ${staleWarning}${incomplete}
+
+      <textarea
+        id="autropy-summary"
+        class="autropy-summary"
+        rows="6"${locked || stale ? ' readonly' : ''}
+      >${escapeHtml(s.summaryDraft || '')}</textarea>
+
+      ${noteToggle}
+      ${renderSynthesisTable(run)}
+
+      <div class="autropy-status" id="autropy-status"></div>`
+}
+
+function renderSynthesisTable (run) {
+  const s = run.synthesis
+  const suggestions = s?.result?.metadata_suggestions
+  const locked = isLocked(run)
+  const stale = isSynthesisStale(run)
+  const current = run.itemMetadata || {}
+
+  if (!suggestions) {
+    return `
+      <section class="autropy-section">
+        <p class="autropy-note">The model suggested no metadata for this item.</p>
+      </section>`
+  }
+
+  const rows = Object.entries(suggestions).map(([field, value]) => {
+    const accepted = isSynthesisFieldAccepted(run, field)
+    const existing = current[field]
+    const replaces = (existing != null && String(existing).trim() &&
+      String(existing).trim() !== String(value).trim())
+      ? `<span class="autropy-meta-row__replaces">replaces: ${escapeHtml(existing)}</span>`
+      : ''
+
+    const action = (locked || stale)
+      ? `<td class="autropy-meta-row__action autropy-meta-row__outcome">${
+        locked ? (accepted ? 'written' : '—') : ''}</td>`
+      : `<td class="autropy-meta-row__action">
+          <button class="autropy-meta-row__accept">${accepted ? 'Undo' : 'Accept'}</button>
+        </td>`
+
+    return `
+      <tr class="autropy-meta-row" data-field="${escapeAttr(field)}" data-accepted="${
+  accepted ? 'true' : 'false'}">
+        <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
+        <td class="autropy-meta-row__value">${escapeHtml(String(value))}${replaces}</td>
+        ${action}
+      </tr>`
+  }).join('')
+
+  return `
+    <section class="autropy-section">
+      <table class="autropy-meta-table">
+        <colgroup>
+          <col class="autropy-meta-col--field">
+          <col>
+          <col class="autropy-meta-col--action">
+        </colgroup>
+        <thead>
+          <tr><th>Field</th><th>Suggested for the whole item</th><th></th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>`
 }
 
 // The banner an applied run carries instead of its controls.
@@ -816,6 +990,34 @@ function renderAppliedBanner (run) {
 export function buildPanelHTML ({
   run, photoId, existingTagNames, suggestMetadata, modelChoices = []
 }) {
+  const locked = isLocked(run)
+
+  // The item-summary view replaces the body but keeps the pager, the actions and
+  // the model picker, so it reads as one more page rather than another screen.
+  if (photoId === SYNTHESIS) {
+    const stale = isSynthesisStale(run)
+    const actions = locked
+      ? `<button class="autropy-btn" id="autropy-dismiss">Close</button>`
+      : `<button class="autropy-btn" id="autropy-dismiss">Dismiss</button>
+        <button class="autropy-btn${run.synthesis && !stale ? '' : ' autropy-btn--primary'}"
+          id="autropy-synthesize">${run.synthesis ? 'Generate again' : 'Generate item summary'}</button>
+        <button class="autropy-btn autropy-btn--primary" id="autropy-apply">Apply accepted</button>`
+
+    return `
+    ${PANEL_STYLES}
+    <div id="autropy-panel" data-locked="${locked ? 'true' : 'false'}" data-run="${
+  escapeAttr(run.id)}" data-view="synthesis">
+      ${renderPager(run, SYNTHESIS)}
+      ${renderAppliedBanner(run)}
+      ${renderSynthesis(run)}
+      <div class="autropy-actions">
+        <span class="autropy-actions__spacer"></span>
+        <button class="autropy-btn" id="autropy-stop" hidden>Stop</button>
+        ${actions}
+      </div>
+    </div>`
+  }
+
   const entry = photoEntry(run, photoId)
   const result = entry?.result ?? {}
   const {
@@ -823,8 +1025,6 @@ export function buildPanelHTML ({
     possible_tags: tags = [],
     confidence = null
   } = result
-
-  const locked = isLocked(run)
 
   const existingSet = new Set(
     (existingTagNames || []).map(n => n.toLowerCase())

@@ -46,8 +46,31 @@ Each page keeps its own summary, editable independently, and **Apply accepted** 
 page. Tags are pooled across the whole item and de-duplicated.
 
 **Metadata is not suggested per page.** Tropy keeps one value per field, so six pages proposing six
-descriptions would mean the last one silently wins. Item metadata will come from an item-level
-summary instead; single-photo items are unaffected and still suggest metadata as before.
+descriptions would mean the last one silently wins. It comes from the item summary instead.
+Single-photo items are unaffected and still suggest metadata as before.
+
+### The item summary
+
+One step past the last page in the pager is **Item summary** — one description of the item as a
+whole, written from the page summaries. It is a text-only request: it reads the page descriptions,
+not the images again.
+
+You ask for it; it does not happen on its own. It reads your summaries **as you have left them**, so
+the point is to review the pages first and correct anything wrong before pressing **Generate item
+summary**. If you then edit a page summary, the item summary is marked stale and neither its text
+nor its metadata can be applied until you generate it again — an item description quietly derived
+from text you had already rejected would be the worst mistake this tool could make.
+
+It offers:
+
+- **Item metadata** — title, date and description for the whole item, accepted row by row, with the
+  same `replaces:` warning as anywhere else.
+- **A note, if you want one** — off by default. Per-page notes record the analysis; an item summary
+  is an interpretation. Tropy has no item-level note, so it attaches to the first analyzed page and
+  says in its first line that it describes the whole item.
+
+If some pages could not be analyzed, the model is told so and the summary says how many pages it
+actually covers.
 
 ### Comparing models
 
@@ -298,8 +321,8 @@ On startup AUTROPY logs one line naming the Tropy version, the route shape and t
 
 ## Known limitations
 
-- **No item-level summary yet.** Multi-page items are analyzed page by page, but nothing yet reads those pages together to propose one description for the whole item — which is also why metadata is not suggested for multi-page items.
 - **One item at a time.** Selecting several items still analyzes only the one you are viewing.
+- **No provenance on metadata fields.** Notes carry a provenance footer; applied metadata values do not, so a machine-written value and a hand-written one are indistinguishable once applied. The `replaces:` warning tells you at the moment of accepting; it does not persist.
 - **No local/offline model support** in this release — see [Local models](#local-models--not-supported-in-this-release).
 - **TIFF images are rejected** rather than transcoded.
 - **"File → Export → Autropy" is a misleading label.** This is analysis, not export. Tropy derives the label from the plugin name and only exposes import, export, extract and transcribe hooks, so an item-scoped action has nowhere else to live. `tropy-plugin-segmenter` documents the same constraint; it needs a change in Tropy itself.

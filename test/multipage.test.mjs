@@ -135,9 +135,21 @@ test('the pager says where you are and is bounded at both ends', () => {
   assert.match(first, /id="autropy-prev" disabled/)
   assert.doesNotMatch(first, /id="autropy-next" disabled/)
 
+  // The last page is NOT the last step: the item summary sits one past it.
   const last = panel(run, 467)
   assert.match(last, /Page 6 of 6/)
-  assert.match(last, /id="autropy-next" disabled/)
+  assert.doesNotMatch(last, /id="autropy-next" disabled/)
+})
+
+test('without enough analyzed pages the last page is the last step', () => {
+  // Failed pages stay in the pager — you need to see which ones they are — but
+  // one analyzed page is not a synthesis of anything, so there is no step past
+  // the end.
+  const run = sixPages()
+  for (const p of run.photos.slice(1)) p.status = 'failed'
+
+  assert.match(panel(run, 467), /id="autropy-next" disabled/)
+  assert.match(panel(run, 462), /Page 1 of 6/)
 })
 
 test('a single-photo run has no pager at all', () => {

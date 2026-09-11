@@ -134,3 +134,36 @@ export function validateResult (parsed) {
     confidence: normalizeConfidence(parsed.confidence)
   }
 }
+
+// ---------------------------------------------------------------------------
+// Item-level synthesis
+// ---------------------------------------------------------------------------
+
+// A different shape from the per-photo result: no tags, no document type — the
+// pages already supplied those — and its metadata describes the whole item.
+//
+// Validated separately rather than squeezed through validateResult, which would
+// have demanded a "summary" field this response does not have and reported its
+// absence as the model misbehaving.
+export function validateSynthesis (parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      '[AUTROPY] the model did not return a JSON object for the item summary.')
+  }
+
+  const summary = typeof parsed.item_summary === 'string' ? parsed.item_summary.trim() : ''
+  if (!summary) {
+    throw new Error(
+      '[AUTROPY] the model returned no "item_summary" field. ' +
+      `Keys returned: ${Object.keys(parsed).join(', ') || '(none)'}`)
+  }
+
+  const metadata = normalizeMetadataSuggestions(parsed.metadata_suggestions)
+
+  return {
+    item_summary: summary,
+    metadata_suggestions: metadata.suggestions,
+    suppressed: metadata.suppressed,
+    confidence: normalizeConfidence(parsed.confidence)
+  }
+}

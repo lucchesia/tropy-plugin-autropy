@@ -37,7 +37,8 @@ import {
   UNKNOWN
 } from './gateway.js'
 import { readPhotoUnprocessed, renderPhoto } from './image.js'
-import { buildPrompt } from './prompt.js'
+import { buildPrompt, buildSynthesisPrompt } from './prompt.js'
+import { validateSynthesis } from './result-schema.js'
 import { PANEL_STYLES, buildPanelHTML, renderStatusLines } from './panel-template.js'
 import { escapeHtml, textToParagraphs } from './html.js'
 import {
@@ -55,6 +56,9 @@ import {
   ledgerState,
   metadataOp,
   noteOp,
+  SYNTHESIS,
+  canSynthesize,
+  isSynthesisFieldAccepted,
   photoCacheKey,
   photoEntry,
   photoIndex,
@@ -65,8 +69,15 @@ import {
   setFailed,
   setResult,
   setSummaryDraft,
+  setSynthesis,
+  setSynthesisDraft,
+  synthesisKey,
+  synthesisNoteOp,
+  synthesisSources,
   tagOp,
   toggleField,
+  toggleSynthesisField,
+  toggleSynthesisNote,
   toggleTag
 } from './run.js'
 
@@ -619,6 +630,87 @@ class AutropyPlugin {
     setResult(run, photoId, { result })
   }
 
+  // ── item summary ─────────────────────────────────────────────────────────
+
+  // One more request, over text only — it reads the page summaries rather than
+  // the images again.
+  //
+  // Requested, never automatic. It reads the DRAFTS as the researcher left
+  // them, so it has to happen after they have reviewed the pages; generating it
+  // the moment the last page landed would describe the item from text they were
+  // about to correct.
+  async #synthesize (run) {
+    const { logger } = this.context
+    const { apiKey, outputLanguage } = this.options
+
+    if (this.#activeRun) {
+      logger.warn('[AUTROPY] analysis already running — ignoring this click')
+      return
+    }
+
+    const sources = synthesisSources(run)
+    if (sources.length < 2) return
+
+    const sourceKey = synthesisKey(run)
+    const incomplete = sources.length < run.photos.length
+
+    const runId = ++this.#runCounter
+    const controller = new AbortController()
+    this.#activeRun = {
+      id: runId,
+      controller,
+      itemId: run.itemId,
+      photoId: this.#readNav().photoId,
+      projectPath: run.projectPath
+    }
+    this.#setToolbarBusy(true)
+
+    logger.warn(
+      `[AUTROPY] writing the item summary — run ${run.id}, ` +
+      `${sources.length}/${run.photos.length} pages`)
+
+    try {
+      const prompt = buildSynthesisPrompt(sources, {
+        itemMetadata: run.itemMetadata,
+        outputLanguage,
+        incomplete,
+        total: run.photos.length
+      })
+
+      const { result, servedModel } = await analyze({
+        model: run.model,
+        prompt,
+        apiKey,
+        signal: controller.signal,
+        validate: validateSynthesis
+      })
+
+      if (this.#activeRun?.id !== runId) {
+        logger.warn('[AUTROPY] item summary finished after navigating away — discarding')
+        return
+      }
+
+      run.servedModel = servedModel || run.servedModel
+      setSynthesis(run, { result, sourceKey, incomplete })
+
+      logger.warn(
+        `[AUTROPY] item summary complete — confidence ${result.confidence ?? 'not reported'}`)
+
+      this.#renderPanelInPlace(run, SYNTHESIS)
+    } catch (err) {
+      if (controller.signal.aborted) {
+        logger.warn('[AUTROPY] item summary cancelled')
+        return
+      }
+
+      logger.error({ stack: err.stack }, `[AUTROPY] item summary failed: ${err.message}`)
+      this.#fatal('Autropy could not write the item summary', err.message)
+    } finally {
+      if (this.#activeRun?.id === runId) this.#activeRun = null
+      if (!this.#activeRun) this.#setToolbarBusy(false)
+    }
+  }
+
   // Asks before spending. The dialog is also the scope chooser, so there is one
   // interruption rather than two, and it states the real number of new requests
   // — photos already analyzed under the same prompt and model replay for free.
@@ -876,7 +968,8 @@ class AutropyPlugin {
       // Every keystroke goes into the run. Reading the textarea only at Apply
       // time meant an edit was lost the moment anything re-rendered the panel.
       summary.addEventListener('input', () => {
-        setSummaryDraft(run, photoId, summary.value)
+        if (photoId === SYNTHESIS) setSynthesisDraft(run, summary.value)
+        else setSummaryDraft(run, photoId, summary.value)
       })
       // Without focus here, focus stays on section.esper and all keys are
       // treated as image shortcuts.
@@ -909,17 +1002,36 @@ class AutropyPlugin {
           const row = btn.closest('.autropy-meta-row')
           if (!row) return
 
-          toggleField(run, photoId, row.dataset.field)
+          const field = row.dataset.field
+          let accepted
 
-          // Re-read from the run rather than flipping the attribute, so the
-          // markup can never drift from the state Apply will actually use.
-          const accepted = !!photoEntry(run, photoId)
-            ?.accept.fields.includes(row.dataset.field)
+          if (photoId === SYNTHESIS) {
+            toggleSynthesisField(run, field)
+            accepted = isSynthesisFieldAccepted(run, field)
+          } else {
+            toggleField(run, photoId, field)
+            // Re-read from the run rather than flipping the attribute, so the
+            // markup can never drift from the state Apply will actually use.
+            accepted = !!photoEntry(run, photoId)?.accept.fields.includes(field)
+          }
+
           row.dataset.accepted = String(accepted)
           btn.textContent = accepted ? 'Undo' : 'Accept'
         })
       })
     }
+
+    panel.querySelector('#autropy-synthesis-note')?.addEventListener('change', e => {
+      toggleSynthesisNote(run)
+      e.target.checked = !!run.synthesis?.accept.note
+    })
+
+    panel.querySelector('#autropy-synthesize')?.addEventListener('click', () => {
+      this.#synthesize(run).catch(err => {
+        this.context.logger.error(
+          { stack: err.stack }, `[AUTROPY] item summary failed: ${err.message}`)
+      })
+    })
 
     panel.querySelector('#autropy-apply')?.addEventListener('click', () => {
       this.#applyAccepted(run, photoId).catch(err => {
@@ -968,8 +1080,17 @@ class AutropyPlugin {
       this.#setToolbarBusy(false)
     })
 
+    // The item summary is one step past the last page, so reaching it is the
+    // same gesture as turning to it.
     const step = delta => {
-      const i = photoIndex(run, photoId) + delta
+      const here = photoId === SYNTHESIS ? run.photos.length : photoIndex(run, photoId)
+      const i = here + delta
+
+      if (i === run.photos.length && canSynthesize(run)) {
+        this.#renderPanelInPlace(run, SYNTHESIS)
+        return
+      }
+
       const next = run.photos[i]
       if (next) this.#showPhoto(run, next.photoId)
     }
@@ -1037,6 +1158,12 @@ class AutropyPlugin {
         this.#closePanel()
         return
       }
+
+      // The item summary is not about any one photo, so photo changes do not
+      // move it. Without this, any store update while reading it — Tropy emits
+      // plenty — would look like navigating to a photo the view is not showing
+      // and close the panel.
+      if (this.#current.photoId === SYNTHESIS) return
 
       // Same item, different photo: follow it if the run covers that photo, so
       // clicking the filmstrip pages the panel. A photo the run does not cover
@@ -1196,17 +1323,20 @@ class AutropyPlugin {
     }
 
     for (const note of notes) {
-      const html = this.#buildNoteHtml(run, note.text)
+      const isSynthesis = note.kind === SYNTHESIS
+      const html = this.#buildNoteHtml(run, note.text, { synthesis: isSynthesis })
       if (!html) continue
 
-      const key = noteOp(note.photoId)
+      const key = isSynthesis ? synthesisNoteOp() : noteOp(note.photoId)
       recordOperation(run, { key, kind: 'note', status: OP_PENDING })
 
       const outcome = await gateway.createNote(note.photoId, html)
       this.#recordOutcome(run, { key, kind: 'note', outcome })
 
       if (outcome.status === ACKNOWLEDGED && outcome.noteId) {
-        logger.warn(`[AUTROPY] note ${outcome.noteId} written to photo ${note.photoId}`)
+        logger.warn(
+          `[AUTROPY] ${isSynthesis ? 'item summary' : 'note'} ${outcome.noteId} ` +
+          `written to photo ${note.photoId}`)
       }
     }
 
@@ -1266,9 +1396,15 @@ class AutropyPlugin {
     }
   }
 
-  #buildNoteHtml (run, summary) {
+  #buildNoteHtml (run, summary, { synthesis = false } = {}) {
     const body = textToParagraphs(summary)
     if (!body) return null
+
+    // An item summary lands on one page but describes the whole item. Saying so
+    // in the note stops it reading as a claim about that page alone.
+    const heading = synthesis
+      ? '<p><strong>Item summary — describes all pages of this item</strong></p>'
+      : ''
 
     // `run.model` and not `this.options.model`: the preference can have changed
     // since the analysis ran, and a note that names the wrong model is a
@@ -1287,7 +1423,7 @@ class AutropyPlugin {
       `${AUTROPY_NOTE_MARKER} model: ${run.model}${served} | ` +
       `${new Date().toISOString()} | v${AUTROPY_VERSION} | run ${run.id}`
 
-    return `${body}<p>---<br>${escapeHtml(provenance)}</p>`
+    return `${heading}${body}<p>---<br>${escapeHtml(provenance)}</p>`
   }
 
   // ── teardown ─────────────────────────────────────────────────────────────

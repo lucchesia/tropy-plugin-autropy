@@ -8,10 +8,9 @@
 //   Updated to a stronger scholarly instruction set with a revised JSON output structure.
 //   Source: autropy_default_prompt.txt provided by Anita Lucchesi, 2026-04-11.
 
-// FUTURE: A second-pass item-level synthesis prompt is planned — it would take
-// all per-photo AUTROPY summaries for a multipage item and synthesize them into
-// a single scholarly item summary with a suggested title. See the Jupyter notebook
-// phase prompts for the original design. Not implemented in alpha.
+// The item-level synthesis is at the bottom of this file: a second pass that
+// reads the per-page summaries a researcher has reviewed and proposes one
+// description for the whole item.
 
 // ---------------------------------------------------------------------------
 // Analysis instructions — what the model should do (replaceable by custom prompt)
@@ -105,6 +104,87 @@ export function buildPrompt (userPrompt, existingTags, itemMetadata, outputLangu
   // sees it as a final override. Keys and field names stay in English regardless.
   if (outputLanguage && outputLanguage.trim().length > 0) {
     prompt += `\n\nWrite all prose output (summary field, metadata suggestion values) in: ${outputLanguage.trim()}. JSON keys, field names, document_type values, and tag strings must remain in English.`
+  }
+
+  return prompt
+}
+
+// ---------------------------------------------------------------------------
+// Item-level synthesis — the second pass over a multi-page item
+//
+// Text only: it reads the page summaries, not the images again. Re-sending six
+// scans to ask a question about text already extracted from them would be paid
+// for twice and answered no better.
+//
+// It is given the DRAFTS as the researcher left them. If page three was
+// corrected by hand, the item description must be built from the correction —
+// an item summary quietly derived from text its author already rejected would
+// be the worst error this tool could make.
+// ---------------------------------------------------------------------------
+
+const SYNTHESIS_INSTRUCTIONS = `You are a historian and archival researcher writing a single catalogue-level description of ONE archival item, working from page-level descriptions of its photographs.
+
+**Your task:**
+- Read the page descriptions below as parts of one document or dossier, in order.
+- Write one connected scholarly account of the item as a whole: what it is, what it concerns, who and what it names, and the span of dates it covers.
+- Identify what carries across pages — a case, a correspondence, a file — rather than restating each page in turn.
+- Where the pages disagree or one is uncertain, say so plainly instead of resolving it silently.
+- Do not introduce facts that are not present in the page descriptions. You are not looking at the images.`
+
+const SYNTHESIS_FORMAT_BLOCK = `**Your response must be valid JSON only — no preamble, no markdown, no explanation outside the JSON block:**
+
+{
+  "item_summary": "<4-8 sentences describing the item as a whole, as a catalogue entry would.>",
+  "metadata_suggestions": {
+    "title": "<a title for the whole item, otherwise null>",
+    "date": "<the date or date range the item as a whole covers, otherwise null>",
+    "description": "<a concise archival description of the whole item suitable for a metadata field, otherwise null>"
+  },
+  "confidence": <0.0-1.0 reflecting how well the page descriptions support a single account>
+}`
+
+// pages: [{ photoId, text }] in item order, already filtered to analyzed pages.
+// incomplete: true when some pages failed or were never run, which the model is
+//   told so it can qualify rather than imply completeness it does not have.
+export function buildSynthesisPrompt (pages, {
+  itemMetadata = null,
+  outputLanguage = '',
+  incomplete = false,
+  total = null
+} = {}) {
+  let block = SYNTHESIS_INSTRUCTIONS
+
+  if (incomplete && total != null) {
+    block += `\n\nNOTE: only ${pages.length} of this item's ${total} pages could be analyzed. ` +
+      'Describe what these pages show and state explicitly that the item is only ' +
+      'partially covered.'
+  }
+
+  if (itemMetadata && typeof itemMetadata === 'object') {
+    const lines = Object.entries(itemMetadata)
+      .map(([field, value]) => {
+        const display = (value === null || value === undefined || value === '')
+          ? '(empty)'
+          : String(value)
+        return `  ${field}: ${display}`
+      })
+      .join('\n')
+
+    if (lines.length > 0) {
+      block += '\n\nCURRENT ITEM METADATA (already filled fields — do not duplicate; ' +
+        `focus on empty ones):\n${lines}`
+    }
+  }
+
+  const pageText = pages
+    .map((p, i) => `--- PAGE ${i + 1} of ${pages.length} ---\n${p.text}`)
+    .join('\n\n')
+
+  let prompt = `${block}\n\nPAGE DESCRIPTIONS:\n\n${pageText}\n\n${SYNTHESIS_FORMAT_BLOCK}`
+
+  if (outputLanguage && outputLanguage.trim().length > 0) {
+    prompt += `\n\nWrite all prose output in: ${outputLanguage.trim()}. JSON keys and ` +
+      'field names must remain in English.'
   }
 
   return prompt
