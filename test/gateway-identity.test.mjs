@@ -146,6 +146,39 @@ test('a redirected collection URL is the only signal distinguishing the shapes',
   assert.equal(await shapeFor(shimProbe.namespaced), 'refused')
 })
 
+test('the default fetch is bound to the global, not to the gateway', async () => {
+  // Browsers require window.fetch to be invoked with the global as receiver.
+  // Storing the bare reference and calling `this.fetch(...)` gives it the
+  // gateway instead, and Chromium rejects that with
+  //   Failed to execute 'fetch' on 'Window': Illegal invocation
+  // which degraded every read to its fallback and made writes refuse. Node's
+  // fetch does not care, so only an explicit receiver check catches it.
+  const original = globalThis.fetch
+  let receiverWasGlobal = null
+
+  globalThis.fetch = function (url) {
+    receiverWasGlobal = this === globalThis
+    if (!receiverWasGlobal) {
+      throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation")
+    }
+    return identity(PROJECT_PATH)
+  }
+
+  try {
+    // No fetch injected — this is the path the plugin actually uses.
+    const gw = new RestProjectGateway({
+      projectPath: PROJECT_PATH, port: PORT, logger: silentLogger
+    })
+
+    const resolved = await gw.resolve()
+
+    assert.equal(receiverWasGlobal, true)
+    assert.equal(resolved.shape, 'scoped')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 test('refuses to act at all when the window has no project path', async () => {
   const { fetch, calls } = recorder(() => identity(PROJECT_PATH))
 

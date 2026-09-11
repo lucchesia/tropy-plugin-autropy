@@ -95,7 +95,13 @@ export class RestProjectGateway {
     this.projectPath = projectPath || null
     this.port = port
     this.logger = logger || { warn () {}, error () {} }
-    this.fetch = fetchImpl || globalThis.fetch
+
+    // `.bind(globalThis)` is load-bearing, not decoration. Storing the bare
+    // reference and calling `this.fetch(…)` invokes it with the gateway as
+    // receiver, and the browser rejects that:
+    //   Failed to execute 'fetch' on 'Window': Illegal invocation
+    // Which degraded every read to its fallback and made writes refuse.
+    this.fetch = fetchImpl || globalThis.fetch.bind(globalThis)
     this.root = `http://localhost:${port}`
 
     this.resolved = null      // { shape, base, version, projectPath }

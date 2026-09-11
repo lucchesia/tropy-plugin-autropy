@@ -16,7 +16,7 @@
 //
 // Nothing is written to Tropy until the researcher presses "Apply accepted".
 
-import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 // Imported rather than duplicated as a constant: the version previously lived
 // in four places and had already drifted (the installed build said alpha.1
 // while the repo said alpha.2), which corrupts note provenance.
@@ -29,6 +29,7 @@ import {
   RestProjectGateway,
   UNKNOWN
 } from './gateway.js'
+import { readPhotoUnprocessed, renderPhoto } from './image.js'
 import { buildPrompt } from './prompt.js'
 import { buildPanelHTML, renderStatusLines } from './panel-template.js'
 import { escapeHtml, textToParagraphs } from './html.js'
@@ -59,6 +60,7 @@ class AutropyPlugin {
   #navUnsub = null
   #analysisCache = new Map()   // photoId → cached analysis, avoids paying twice
 
+  #containerPosition = null    // Tropy's own inline position, to restore on cleanup
   #gateway = null
   #activeRun = null            // { id, controller, itemId, photoId } while analyzing
   #runCounter = 0
@@ -195,12 +197,21 @@ class AutropyPlugin {
 
       const finalPrompt = buildPrompt(prompt, existingTagNames, itemMetadata, outputLanguage)
 
-      // Images are read from disk: the photo object carries an absolute path.
-      const base64 = readFileSync(photo.path).toString('base64')
+      // Downscale and re-encode via Tropy's own sharp. Sending the original is
+      // what made a 9 MB scan fail: base64 inflates it past the provider's
+      // 10 MB ceiling, and anything over ~1568 px is downscaled server-side
+      // anyway. This also selects the right page of a multi-page file.
+      const { sharp } = this.context
+      const scan = sharp
+        ? await renderPhoto(sharp, photo, {})
+        : await readPhotoUnprocessed(readFile, photo)
 
-      logger.warn(`[AUTROPY] calling model: ${model}...`)
-      const result = await analyzeImage(base64, finalPrompt, model, apiKey, {
-        mediaType: photo.mimetype,
+      logger.warn(
+        `[AUTROPY] calling model: ${model} — ${Math.round(scan.bytes / 1024)} KB ` +
+        `${scan.mediaType}${photo.page > 0 ? `, page ${photo.page + 1}` : ''}`)
+
+      const result = await analyzeImage(scan.base64, finalPrompt, model, apiKey, {
+        mediaType: scan.mediaType,
         signal: controller.signal
       })
 
@@ -345,7 +356,13 @@ class AutropyPlugin {
       return
     }
 
+    // The panel is an absolute overlay, so the container has to be a positioned
+    // ancestor. This mutates one of Tropy's own elements, so remember what was
+    // there and put it back in #removePanel — leaving a host app's layout
+    // permanently altered is how the image viewer ends up misbehaving after the
+    // panel is gone.
     if (getComputedStyle(container).position === 'static') {
+      this.#containerPosition = { el: container, value: container.style.position }
       container.style.position = 'relative'
     }
 
@@ -647,10 +664,21 @@ class AutropyPlugin {
     this.#navUnsub?.()
     this.#navUnsub = null
     document.getElementById('autropy-panel')?.remove()
+    this.#restoreContainerPosition()
     this.#panelInjected = false
     this.#notices = []
     this.#retryable = []
     this.#state = { itemId: null, photoId: null, result: null, existingTags: [] }
+  }
+
+  #restoreContainerPosition () {
+    const saved = this.#containerPosition
+    if (!saved) return
+
+    // Restore the empty string too — that removes the inline declaration and
+    // hands the element back to Tropy's own stylesheet.
+    saved.el.style.position = saved.value
+    this.#containerPosition = null
   }
 
   // Fatal errors go to Tropy's own dialog, not the panel: the panel lives inside
@@ -723,6 +751,7 @@ class AutropyPlugin {
     document.getElementById('autropy-toggle')?.closest('.tool-group')?.remove()
     document.getElementById('autropy-panel')?.remove()
     document.getElementById('autropy-styles')?.remove()
+    this.#restoreContainerPosition()
     this.#toolbarInjected = false
     this.#panelInjected = false
   }

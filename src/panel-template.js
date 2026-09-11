@@ -260,11 +260,31 @@ const PANEL_STYLES = `
     cursor: pointer;
   }
 
+  /* Sticky so Dismiss and Apply are reachable no matter how long the summary
+   * and metadata are. The panel is the scroll container (max-height + overflow
+   * -y: auto), and a long AI description pushed these buttons out of view with
+   * no way back — keyboard events are deliberately swallowed inside the panel,
+   * so there was no way to close it at all. */
+  /* A model-written description runs to several lines and would otherwise crowd
+   * out every other row. Cap it and let it scroll in place. */
+  .autropy-meta-row__value {
+    display: block;
+    max-height: 4.6em;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+  }
+
   .autropy-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
     display: flex;
     justify-content: flex-end;
     gap: 6px;
-    padding-top: 4px;
+    padding: 8px 0 2px;
+    margin-top: auto;
+    background: rgb(246,246,246);       /* CONFIRMED from DevTools */
+    box-shadow: 0 -8px 8px -8px rgba(0,0,0,0.18);
   }
 
   .autropy-btn {
@@ -387,6 +407,13 @@ const PANEL_STYLES = `
       border-color: rgb(60,60,60);
       background: rgb(50,50,50);
       color: rgb(204,204,204);
+    }
+
+    /* Must match #autropy-panel's dark background — the actions row is sticky,
+     * so content scrolls underneath it. */
+    .autropy-actions {
+      background: rgb(38,38,38);
+      box-shadow: 0 -8px 8px -8px rgba(0,0,0,0.5);
     }
 
     .autropy-status {
