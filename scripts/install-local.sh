@@ -20,11 +20,26 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGINS="$HOME/Library/Application Support/$APP/plugins"
 TARGET="$PLUGINS/tropy-plugin-autropy"
 
+# Backups must live OUTSIDE the plugins root. Tropy scans every subdirectory of
+# it, so a backup left alongside the install is scanned as another plugin and
+# shows up in Preferences > Plugins ("plugins scanned: 15" for 14 real ones).
+BACKUPS="$HOME/Library/Application Support/$APP/autropy-install-backups"
+
 if [ ! -d "$PLUGINS" ]; then
   echo "error: no plugins directory for '$APP' at:" >&2
   echo "  $PLUGINS" >&2
   exit 1
 fi
+
+# Sweep up backups written into the plugins root by earlier versions of this
+# script, so the scan stops seeing them.
+shopt -s nullglob
+for stray in "$PLUGINS"/tropy-plugin-autropy.*backup*; do
+  mkdir -p "$BACKUPS"
+  mv "$stray" "$BACKUPS/$(basename "$stray")"
+  echo "moved stray backup out of the plugins directory → $(basename "$stray")"
+done
+shopt -u nullglob
 
 cd "$REPO"
 npm run --silent build
@@ -32,9 +47,10 @@ npm run --silent build
 VERSION="$(node -p "require('./package.json').version")"
 
 if [ -e "$TARGET" ]; then
-  BACKUP="$TARGET.backup-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUPS"
+  BACKUP="$BACKUPS/tropy-plugin-autropy.$(date +%Y%m%d-%H%M%S)"
   mv "$TARGET" "$BACKUP"
-  echo "backed up previous install → $(basename "$BACKUP")"
+  echo "backed up previous install → autropy-install-backups/$(basename "$BACKUP")"
 fi
 
 mkdir -p "$TARGET"

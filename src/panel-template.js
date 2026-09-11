@@ -51,11 +51,8 @@ function renderChip (tagName, isExisting) {
 // All rows use data-field matching the DC_WRITE_URIS keys in dc.js so that
 // #applyAccepted() can write accepted rows without any additional wiring.
 function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
-  // The value text sits in an inner block so its height can be capped without
-  // taking the <td> out of table layout — see .autropy-meta-row__text.
   const valueCell = value =>
-    `<td class="autropy-meta-row__value">` +
-    `<span class="autropy-meta-row__text">${escapeHtml(value)}</span></td>`
+    `<td class="autropy-meta-row__value">${escapeHtml(value)}</td>`
 
   const typeRow = `
       <tr class="autropy-meta-row" data-field="type" data-accepted="false">
@@ -273,19 +270,15 @@ export const PANEL_STYLES = `
     text-overflow: ellipsis;
   }
 
+  /* No height cap and no inner scrollbar. Capping this cell put a second
+   * scrollbar in the middle of the table and clipped the description mid-line,
+   * which is worse than a tall row: the panel is already the scroll container
+   * (max-height + overflow-y) and the action row is sticky, so a long value
+   * costs a scroll, not a lost button. 'overflow-wrap: anywhere' is what keeps
+   * an unbroken string from widening the table. */
   .autropy-meta-row__value {
     padding: 3px 8px;
     overflow-wrap: anywhere;
-  }
-
-  /* A model-written description runs to many lines and would otherwise crowd
-   * out every other row. Capped here on an inner block — not on the <td>,
-   * because 'display: block' on a cell removes it from table layout and
-   * defeats 'table-layout: fixed'. */
-  .autropy-meta-row__text {
-    display: block;
-    max-height: 4.6em;
-    overflow-y: auto;
   }
 
   .autropy-meta-row[data-accepted="true"] .autropy-meta-row__value {
@@ -307,7 +300,11 @@ export const PANEL_STYLES = `
    * and metadata are. The panel is the scroll container (max-height +
    * overflow-y: auto), and a long AI description pushed these buttons out of
    * view with no way back — keyboard events are deliberately swallowed inside
-   * the panel, so there was no way to close it at all. */
+   * the panel, so there was no way to close it at all.
+   *
+   * No shadow or border: a separator here reads as a stray rule across the
+   * panel. The opaque background alone is enough to keep the buttons legible
+   * over whatever scrolls beneath them. */
   .autropy-actions {
     position: sticky;
     bottom: 0;
@@ -318,7 +315,6 @@ export const PANEL_STYLES = `
     padding: 8px 0 2px;
     margin-top: auto;
     background: rgb(246,246,246);       /* CONFIRMED from DevTools */
-    box-shadow: 0 -8px 8px -8px rgba(0,0,0,0.18);
   }
 
   .autropy-btn {
@@ -447,7 +443,6 @@ export const PANEL_STYLES = `
      * so content scrolls underneath it. */
     .autropy-actions {
       background: rgb(38,38,38);
-      box-shadow: 0 -8px 8px -8px rgba(0,0,0,0.5);
     }
 
     .autropy-status {

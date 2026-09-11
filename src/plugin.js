@@ -117,6 +117,38 @@ class AutropyPlugin {
     return this.#getState()?.project?.path ?? null
   }
 
+  // Resolves once `project.path` appears, or null if it never does. Used only
+  // by the preflight: every other caller runs after the researcher has acted,
+  // by which time a project is open.
+  #awaitProjectPath (timeout = 30000) {
+    const now = this.#projectPath()
+    if (now) return Promise.resolve(now)
+
+    const store = this.#store()
+    if (!store || typeof store.subscribe !== 'function') return Promise.resolve(null)
+
+    return new Promise(resolve => {
+      let unsub = null
+      let timer = null
+
+      const finish = value => {
+        unsub?.()
+        clearTimeout(timer)
+        resolve(value)
+      }
+
+      timer = setTimeout(() => finish(null), timeout)
+      unsub = store.subscribe(() => {
+        const path = this.#projectPath()
+        if (path) finish(path)
+      })
+
+      // The path can land between the read above and the subscription.
+      const path = this.#projectPath()
+      if (path) finish(path)
+    })
+  }
+
   // The photo is authoritative for which item we are on: `nav.items[0]` is the
   // first item in *click* order, which need not be the item owning this photo.
   #readNav (state = this.#getState()) {
@@ -839,7 +871,17 @@ class AutropyPlugin {
     // Report the API surface once per session, whether or not the researcher
     // ever clicks. Without this line the last breakage left no trace of which
     // Tropy or which route shape was in play.
-    const projectPath = this.#projectPath()
+    //
+    // Plugins are constructed during project.init, *before* Tropy opens the
+    // project db, so `state.project.path` is still null here. Running the
+    // preflight immediately produced a scary and wrong first impression —
+    // "cannot determine which project this window has open… Open a project and
+    // try again" — while the project was in the middle of opening. Wait for the
+    // path instead, and if it never arrives (no project opened this session)
+    // say nothing: there is nothing to preflight against.
+    const projectPath = await this.#awaitProjectPath()
+    if (!projectPath) return
+
     const port = resolvePort(this.options.port)
 
     this.#gatewayFor(projectPath, port).resolve().catch(err => {

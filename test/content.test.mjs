@@ -234,14 +234,22 @@ test('the table declares a colgroup so fixed layout has widths to use', () => {
   assert.match(html, /autropy-meta-col--action/)
 })
 
-test('a long value is capped on an inner block, not on the cell', () => {
-  // `display: block` on a <td> takes it out of table layout and defeats
-  // table-layout: fixed — which is how this bug came back.
-  const html = panel()
+test('a long value wraps in full rather than getting its own scrollbar', () => {
+  // Capping the cell's height was a worse cure than the disease: it put a
+  // second scrollbar in the middle of the table and clipped the description
+  // mid-line. Containment is the panel's job, and only the panel's.
+  assert.doesNotMatch(PANEL_STYLES, /\.autropy-meta-row__(value|text)\s*\{[^}]*max-height:/)
+  assert.doesNotMatch(PANEL_STYLES, /\.autropy-meta-row__(value|text)\s*\{[^}]*overflow-y:/)
+  assert.match(PANEL_STYLES, /\.autropy-meta-row__value\s*\{[^}]*overflow-wrap:\s*anywhere/,
+    'this, not a height cap, is what stops an unbroken string widening the table')
+})
 
-  assert.match(html, /<td class="autropy-meta-row__value"><span class="autropy-meta-row__text">/)
-  assert.doesNotMatch(PANEL_STYLES, /\.autropy-meta-row__value\s*\{[^}]*display:\s*block/)
-  assert.match(PANEL_STYLES, /\.autropy-meta-row__text\s*\{[^}]*max-height:/)
+test('nothing inside the panel is a second scroll container', () => {
+  // One scrollbar, on #autropy-panel. The summary textarea is the exception:
+  // it is an editable field and scrolls by nature.
+  const styles = PANEL_STYLES.replace(/\.autropy-summary\s*\{[^}]*\}/g, '')
+
+  assert.doesNotMatch(styles, /#?\.?autropy-(?!panel)[\w-]*\s*\{[^}]*overflow(-y)?:\s*(auto|scroll)/)
 })
 
 test('the value text survives wrapping, so Apply still reads it', () => {
