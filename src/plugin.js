@@ -22,7 +22,13 @@ import { readFile } from 'node:fs/promises'
 // while the repo said alpha.2), which corrupts note provenance.
 import { version as AUTROPY_VERSION } from '../package.json'
 import { analyze, resolveModelChoices } from './api.js'
-import { isItemMode, isProjectMode, itemModeAction } from './nav.js'
+import {
+  isItemMode,
+  isProjectMode,
+  itemModeAction,
+  itemPhotoIds,
+  photoAction
+} from './nav.js'
 import {
   ACKNOWLEDGED,
   ProjectIdentityError,
@@ -51,6 +57,8 @@ import {
   noteOp,
   photoCacheKey,
   photoEntry,
+  photoIndex,
+  progressLabel,
   recordOperation,
   retryableOperations,
   runCacheKey,
@@ -287,10 +295,20 @@ class AutropyPlugin {
 
   // The `items` argument is a JSON-LD object whose graph carries no numeric ids,
   // so it cannot be used for REST writes. State is read instead.
-  async export (items) {
+  //
+  // Deliberately NOT awaited. Tropy times the export hook and already logs
+  // `SLOW: item.export` for a single ~15 s analysis; six pages would block it
+  // for minutes, and the researcher cannot use the menu meanwhile. The analysis
+  // runs detached, with its own catch — an unhandled rejection here is a crash
+  // report with no Autropy line in it.
+  export (items) {
     this.context.logger.warn(
       `[AUTROPY] export hook fired — ${items?.['@graph']?.length ?? 0} item(s) in payload`)
-    await this.#runAnalysis()
+
+    this.#runAnalysis().catch(err => {
+      this.context.logger.error(
+        { stack: err?.stack }, `[AUTROPY] analysis failed: ${err?.message}`)
+    })
   }
 
   // ── analysis ─────────────────────────────────────────────────────────────
@@ -341,7 +359,16 @@ class AutropyPlugin {
       return
     }
 
-    const run = createRun({ projectPath, itemId, model, photoIds: [photoId] })
+    // How many photos this item has, in the item's own order. Everything below
+    // is written for a list; a single-photo item is the list of length one.
+    const allPhotoIds = itemPhotoIds(this.#getState(), itemId)
+    const siblings = allPhotoIds.length > 1 ? allPhotoIds : [photoId]
+
+    // Built over every sibling; trimmed to one photo below if that is the
+    // chosen scope. The question cannot be asked yet — an honest count of how
+    // many pages would be re-billed needs the assembled prompt, which needs the
+    // project reads.
+    const run = createRun({ projectPath, itemId, model, photoIds: siblings })
 
     // Re-analysis after something was written is legitimate — the researcher
     // asked for it — but applying the new run will add a second note rather
@@ -360,7 +387,7 @@ class AutropyPlugin {
 
     const runId = ++this.#runCounter
     const controller = new AbortController()
-    this.#activeRun = { id: runId, controller, itemId, photoId }
+    this.#activeRun = { id: runId, controller, itemId, photoId, projectPath }
     this.#setToolbarBusy(true)
     this.#watchNav()
 
@@ -398,87 +425,251 @@ class AutropyPlugin {
       // researcher's own.
       run.itemMetadata = itemMetadata
 
-      // The cache key covers the assembled prompt, so it already reflects the
-      // tag vocabulary and the item's current metadata: fill a field or add a
-      // tag and the next run is a miss, as it should be. `force` skips the
-      // lookup entirely — Re-analyze means re-analyze.
-      const cacheKey = photoCacheKey({
-        projectPath,
-        itemId,
-        photoId,
-        model,
-        promptDigest: digest(finalPrompt),
-        imageFingerprint: imageFingerprint(photo)
-      })
+      const promptDigest = digest(finalPrompt)
 
-      const cached = force ? null : this.#photoCache.get(cacheKey)
+      let photoIds = [photoId]
 
-      if (cached) {
-        logger.warn(`[AUTROPY] reusing a paid-for analysis of photo ${photoId}`)
-        run.servedModel = cached.servedModel
-        setResult(run, photoId, cached)
-        this.#openPanel(run, photoId)
+      if (siblings.length > 1) {
+        // Now that the prompt exists, the cost can be stated exactly rather
+        // than estimated: a page already analyzed under this model and prompt
+        // replays for nothing.
+        const wouldBill = force
+          ? siblings
+          : siblings.filter(id => !this.#photoCache.has(photoCacheKey({
+            projectPath,
+            itemId,
+            photoId: id,
+            model,
+            promptDigest,
+            imageFingerprint: imageFingerprint(this.#getState()?.photos?.[id])
+          })))
+
+        const scope = await this.#askScope({
+          photoIds: siblings, current: photoId, wouldBill: wouldBill.length
+        })
+
+        if (scope == null) {
+          logger.warn('[AUTROPY] multi-page analysis cancelled before any request')
+          return
+        }
+
+        if (scope === 'all') photoIds = siblings
+      }
+
+      // Trim the run to the chosen scope. Built over every sibling so the count
+      // above could be honest; a one-photo scope keeps only that photo, and
+      // nothing downstream has to know the difference.
+      if (photoIds.length !== run.photos.length) {
+        run.photos = run.photos.filter(p => photoIds.includes(p.photoId))
+      }
+
+      // Photos run one at a time. Concurrency would be faster and worse: the
+      // panel could not report honest progress, a Stop would leave calls in
+      // flight that are billed anyway, and providers rate-limit bursts.
+      for (const id of photoIds) {
+        if (controller.signal.aborted) break
+
+        const entry = photoEntry(run, id)
+        const record = this.#getState()?.photos?.[id]
+
+        entry.status = 'running'
+        this.#updateProgress(run)
+
+        try {
+          await this.#analyzePhoto({
+            run, photoId: id, photo: record, model, apiKey,
+            prompt: finalPrompt, promptDigest, force, controller
+          })
+        } catch (err) {
+          if (controller.signal.aborted) break
+
+          // One bad page does not end the run. A six-page item where page four
+          // is a blank verso the provider rejects should still yield five
+          // reviewed pages, not nothing.
+          setFailed(run, id, err)
+          logger.error(
+            { stack: err.stack },
+            `[AUTROPY] photo ${id} failed: ${err.message}`)
+        }
+
+        // The first completed photo is what the panel opens on, so there is
+        // something to read while the rest run.
+        if (!this.#current || this.#current.run !== run) {
+          if (entry.status === 'done') this.#openPanel(run, id)
+        } else {
+          this.#updateProgress(run)
+        }
+      }
+
+      if (controller.signal.aborted) {
+        logger.warn(
+          `[AUTROPY] run ${run.id} stopped — ` +
+          `${run.photos.filter(p => p.status === 'done').length}/${photoIds.length} analyzed`)
+      }
+
+      const done = run.photos.filter(p => p.status === 'done')
+      const failed = run.photos.filter(p => p.status === 'failed')
+
+      if (done.length === 0) {
+        const [first] = failed
+        if (first && !controller.signal.aborted) {
+          this.#fatal('Autropy could not analyze this photo', first.error)
+        }
         return
       }
 
-      // Downscale and re-encode via Tropy's own sharp. Sending the original is
-      // what made a 9 MB scan fail: base64 inflates it past the provider's
-      // 10 MB ceiling, and anything over ~1568 px is downscaled server-side
-      // anyway. This also selects the right page of a multi-page file.
-      const { sharp } = this.context
-      const scan = sharp
-        ? await renderPhoto(sharp, photo, {})
-        : await readPhotoUnprocessed(readFile, photo)
-
-      logger.warn(
-        `[AUTROPY] calling model: ${model} — ${Math.round(scan.bytes / 1024)} KB ` +
-        `${scan.mediaType}${photo.page > 0 ? `, page ${photo.page + 1}` : ''}`)
-
-      const { result, servedModel } = await analyze({
-        model,
-        prompt: finalPrompt,
-        apiKey,
-        image: { base64: scan.base64, mediaType: scan.mediaType },
-        signal: controller.signal
-      })
-
-      logger.warn(
-        `[AUTROPY] analysis complete — confidence ${result.confidence ?? 'not reported'}` +
-        (servedModel && servedModel !== model ? `, served by ${servedModel}` : ''))
-
-      // The run may have been superseded while the model was working. Showing
-      // it now would put one photo's analysis over a different photo.
-      if (this.#activeRun?.id !== runId) {
-        logger.warn('[AUTROPY] analysis finished after navigating away — discarding result')
-        return
+      if (failed.length > 0) {
+        run.notices.push({
+          kind: 'warn',
+          text: `${failed.length} of ${photoIds.length} page(s) could not be analyzed. ` +
+                'The rest are ready to review.'
+        })
       }
 
-      const current = this.#readNav()
-      if (current.photoId !== photoId || current.itemId !== itemId) {
-        logger.warn('[AUTROPY] active photo changed during analysis — discarding result')
-        return
+      // Anything still 'idle' was never reached, because Stop was pressed.
+      for (const entry of run.photos) {
+        if (entry.status === 'idle') entry.status = 'skipped'
       }
 
-      // What the provider says it actually ran, which can differ from the ID
-      // asked for when that ID is an alias. Provenance should record what ran.
-      run.servedModel = servedModel
-
-      this.#photoCache.set(cacheKey, { result, servedModel })
-      setResult(run, photoId, { result })
-      this.#openPanel(run, photoId)
+      if (!this.#current || this.#current.run !== run) {
+        this.#openPanel(run, done[0].photoId)
+      } else {
+        this.#renderPanelInPlace(run, this.#current.photoId)
+      }
     } catch (err) {
       if (controller.signal.aborted) {
         logger.warn('[AUTROPY] analysis cancelled')
         return
       }
 
-      setFailed(run, photoId, err)
       logger.error({ stack: err.stack }, `[AUTROPY] analysis failed: ${err.message}`)
       this.#fatal('Autropy could not analyze this photo', err.message)
     } finally {
       if (this.#activeRun?.id === runId) this.#activeRun = null
       if (!this.#activeRun) this.#setToolbarBusy(false)
+      this.#updateProgress(run)
     }
+  }
+
+  // One photo: cache lookup, render, model call, result. Throws on failure so
+  // the caller can decide whether that ends the run.
+  async #analyzePhoto ({
+    run, photoId, photo, model, apiKey, prompt, promptDigest, force, controller
+  }) {
+    const { logger } = this.context
+
+    if (!photo?.path) {
+      throw new Error(`[AUTROPY] Tropy has no file path for photo ${photoId}`)
+    }
+
+    // The cache key covers the assembled prompt, so it already reflects the tag
+    // vocabulary and the item's current metadata: fill a field or add a tag and
+    // the next run is a miss, as it should be. `force` skips the lookup
+    // entirely — Re-analyze means re-analyze.
+    const cacheKey = photoCacheKey({
+      projectPath: run.projectPath,
+      itemId: run.itemId,
+      photoId,
+      model,
+      promptDigest,
+      imageFingerprint: imageFingerprint(photo)
+    })
+
+    const cached = force ? null : this.#photoCache.get(cacheKey)
+
+    if (cached) {
+      logger.warn(`[AUTROPY] reusing a paid-for analysis of photo ${photoId}`)
+      run.servedModel = run.servedModel || cached.servedModel
+      setResult(run, photoId, cached)
+      return
+    }
+
+    // Downscale and re-encode via Tropy's own sharp. Sending the original is
+    // what made a 9 MB scan fail: base64 inflates it past the provider's 10 MB
+    // ceiling, and anything over ~1568 px is downscaled server-side anyway.
+    // This also selects the right page of a multi-page file.
+    const { sharp } = this.context
+    const scan = sharp
+      ? await renderPhoto(sharp, photo, {})
+      : await readPhotoUnprocessed(readFile, photo)
+
+    logger.warn(
+      `[AUTROPY] calling model: ${model} — photo ${photoId}, ` +
+      `${Math.round(scan.bytes / 1024)} KB ${scan.mediaType}` +
+      `${photo.page > 0 ? `, page ${photo.page + 1}` : ''}`)
+
+    const { result, servedModel } = await analyze({
+      model,
+      prompt,
+      apiKey,
+      image: { base64: scan.base64, mediaType: scan.mediaType },
+      signal: controller.signal
+    })
+
+    logger.warn(
+      `[AUTROPY] photo ${photoId} complete — ` +
+      `confidence ${result.confidence ?? 'not reported'}` +
+      (servedModel && servedModel !== model ? `, served by ${servedModel}` : ''))
+
+    // What the provider says it actually ran, which can differ from the ID
+    // asked for when that ID is an alias. Provenance should record what ran.
+    run.servedModel = servedModel
+
+    this.#photoCache.set(cacheKey, { result, servedModel })
+    setResult(run, photoId, { result })
+  }
+
+  // Asks before spending. The dialog is also the scope chooser, so there is one
+  // interruption rather than two, and it states the real number of new requests
+  // — photos already analyzed under the same prompt and model replay for free.
+  //
+  // Tropy resolves dialog.show('message-box', …) to { response, checked }, where
+  // response is the index of the button pressed. Verified in beta.5's bundle.
+  async #askScope ({ photoIds, current, wouldBill }) {
+    const count = photoIds.length
+    const position = photoIds.indexOf(current) + 1
+    const reused = count - wouldBill
+
+    const detail =
+      `This item has ${count} photos, and you are on photo ${position || 1}.\n\n` +
+      `Analyzing all of them makes ${wouldBill} new request(s) to the model` +
+      (reused > 0
+        ? `; ${reused} page(s) were already analyzed with this model and prompt ` +
+          'and will be reused without being billed again.'
+        : ', one per page, each billed.')
+
+    try {
+      const { response } = await this.context.dialog.show('message-box', {
+        type: 'question',
+        message: `Analyze all ${count} photos of this item?`,
+        detail,
+        buttons: [`Analyze all ${count} photos`, 'Only this photo', 'Cancel'],
+        defaultId: 0,
+        cancelId: 2
+      })
+
+      if (response === 0) return 'all'
+      if (response === 1) return 'one'
+      return null
+    } catch (err) {
+      // A dialog that cannot be shown must not silently become "analyze all" —
+      // that would spend money the researcher never approved.
+      this.context.logger.error(
+        { stack: err.stack }, `[AUTROPY] could not ask about scope: ${err.message}`)
+      return 'one'
+    }
+  }
+
+  // Refreshes the pager's per-photo status without rebuilding the panel, so a
+  // summary being read or edited is not yanked away every time a page lands.
+  #updateProgress (run) {
+    if (this.#current?.run !== run) return
+
+    const el = document.getElementById('autropy-progress')
+    if (el) el.textContent = progressLabel(run)
+
+    const stop = document.getElementById('autropy-stop')
+    if (stop) stop.hidden = !this.#activeRun
   }
 
   // A model call takes ten to twenty seconds and, until the panel appears, the
@@ -768,6 +959,41 @@ class AutropyPlugin {
     panel.querySelector('#autropy-dismiss')?.addEventListener('click', () => {
       this.#dismissPanel()
     })
+
+    panel.querySelector('#autropy-stop')?.addEventListener('click', () => {
+      if (!this.#activeRun) return
+      this.context.logger.warn('[AUTROPY] stopped by the researcher')
+      this.#activeRun.controller.abort()
+      this.#activeRun = null
+      this.#setToolbarBusy(false)
+    })
+
+    const step = delta => {
+      const i = photoIndex(run, photoId) + delta
+      const next = run.photos[i]
+      if (next) this.#showPhoto(run, next.photoId)
+    }
+
+    panel.querySelector('#autropy-prev')?.addEventListener('click', () => step(-1))
+    panel.querySelector('#autropy-next')?.addEventListener('click', () => step(1))
+
+    this.#updateProgress(run)
+  }
+
+  // Moves both the panel and Tropy's own photo selection. Reviewing page 3 while
+  // the viewer still shows page 1 is how a description gets approved for the
+  // wrong page.
+  #showPhoto (run, photoId) {
+    const store = this.#store()
+
+    if (store && typeof store.dispatch === 'function') {
+      // #watchNav sees the change and re-renders; no need to do it twice.
+      store.dispatch(photoAction(photoId))
+
+      if (this.#readNav().photoId === photoId) return
+    }
+
+    this.#renderPanelInPlace(run, photoId)
   }
 
   // ── navigation watching ──────────────────────────────────────────────────
@@ -788,17 +1014,39 @@ class AutropyPlugin {
       if (!state?.nav) return
 
       const { itemId, photoId } = this.#readNav(state)
+      const projectPath = state?.project?.path ?? null
 
+      // A multi-photo run walks the item's photos itself, and the pager moves
+      // Tropy's selection with it — so a photo change within the same item is
+      // the run working, not the researcher leaving. Only a change of item, or
+      // of project, ends it.
       const active = this.#activeRun
-      if (active && (active.photoId !== photoId || active.itemId !== itemId)) {
+      if (active && (active.itemId !== itemId || active.projectPath !== projectPath)) {
         this.context.logger.warn('[AUTROPY] navigation changed during analysis — cancelling')
         active.controller.abort()
         this.#activeRun = null
+        this.#setToolbarBusy(false)
       }
 
-      if (this.#panelInjected && this.#current &&
-          (this.#current.photoId !== photoId || this.#current.run.itemId !== itemId)) {
+      if (!this.#panelInjected || !this.#current) return
+
+      const { run } = this.#current
+
+      if (run.itemId !== itemId || run.projectPath !== projectPath) {
         this.context.logger.warn('[AUTROPY] navigation changed — closing stale panel')
+        this.#closePanel()
+        return
+      }
+
+      // Same item, different photo: follow it if the run covers that photo, so
+      // clicking the filmstrip pages the panel. A photo the run does not cover
+      // has nothing to show, so the panel closes as before.
+      if (this.#current.photoId === photoId) return
+
+      if (photoEntry(run, photoId)) {
+        this.#renderPanelInPlace(run, photoId)
+      } else {
+        this.context.logger.warn('[AUTROPY] moved to a photo outside this run — closing panel')
         this.#closePanel()
       }
     }
@@ -891,13 +1139,18 @@ class AutropyPlugin {
       throw new Error('[AUTROPY] nothing to apply — no active item or photo')
     }
 
-    // The panel may have sat open for minutes while the summary was edited, so
-    // neither the analysed photo nor the write target can be assumed current.
+    // The panel may have sat open for minutes while the summaries were edited,
+    // so the write target cannot be assumed current.
+    //
+    // The item is what must still match — not the photo. A multi-page run
+    // legitimately covers several photos and its pager moves between them, so
+    // requiring the on-screen photo to be the one analyzed would refuse an
+    // Apply that is entirely correct.
     const current = this.#readNav()
-    if (current.photoId !== photoId || current.itemId !== itemId) {
+    if (current.itemId !== itemId || this.#projectPath() !== run.projectPath) {
       this.#fatal(
         'Nothing was written',
-        'The photo on screen is no longer the one that was analyzed, so Autropy ' +
+        'The item on screen is no longer the one that was analyzed, so Autropy ' +
         'stopped rather than write to the wrong item. Re-run the analysis.')
       this.#closePanel()
       return

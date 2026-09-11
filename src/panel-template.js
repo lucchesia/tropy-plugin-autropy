@@ -22,8 +22,11 @@ import {
   appliedSummary,
   isFieldAccepted,
   isLocked,
+  isMultiPhoto,
   isTagAccepted,
   photoEntry,
+  photoIndex,
+  progressLabel,
   uncertainOperations
 } from './run.js'
 
@@ -73,6 +76,20 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
   const metadataSuggestions = result.metadata_suggestions
   const locked = isLocked(run)
   const current = run.itemMetadata || {}
+
+  // Item metadata has exactly one value per field, but a six-page item produces
+  // six sets of suggestions. Merging them would make the last page silently win
+  // — three pages proposing three different descriptions and no sign which one
+  // was written. So in a multi-page run the per-page analyses contribute notes
+  // and tags only, and item metadata comes from the item summary instead.
+  if (isMultiPhoto(run)) {
+    return `
+    <section class="autropy-section">
+      <p class="autropy-note">Each page contributes its own note and tags. Metadata
+      describes the whole item, not one page, so it is not suggested per page —
+      the item summary is where it will come from.</p>
+    </section>`
+  }
 
   // Accepting a suggestion for a field that already holds something REPLACES it,
   // and Tropy keeps one value per property. That has to be visible before the
@@ -251,6 +268,46 @@ export const PANEL_STYLES = `
 
   .autropy-header__confidence {
     font-variant-numeric: tabular-nums;
+  }
+
+  .autropy-pager {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: rgb(128,128,128); /* UNVERIFIED: muted text */
+  }
+
+  .autropy-pager__step {
+    padding: 0 6px;
+    font-size: 10px;
+    line-height: 18px;
+    border-radius: 3px;
+    cursor: pointer;
+    border: 1px solid rgb(210,210,210); /* CONFIRMED from DevTools */
+    background: rgb(246,246,246);       /* CONFIRMED from DevTools */
+    color: rgb(34,34,34);               /* CONFIRMED from DevTools */
+  }
+
+  .autropy-pager__step[disabled] {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .autropy-pager__position {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .autropy-pager__state,
+  .autropy-pager__progress {
+    font-style: italic;
+  }
+
+  .autropy-note {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: rgb(128,128,128); /* UNVERIFIED: muted text */
   }
 
   .autropy-summary {
@@ -641,10 +698,16 @@ export const PANEL_STYLES = `
       color: #e0a06a;
     }
 
-    .autropy-model {
+    .autropy-model,
+    .autropy-pager__step {
       border-color: rgb(60,60,60);
       background: rgb(50,50,50);
       color: rgb(204,204,204);
+    }
+
+    .autropy-pager,
+    .autropy-note {
+      color: rgb(120,120,120);
     }
 
     .autropy-status__line--ok .autropy-status__mark { color: #7cc98a; }
@@ -662,6 +725,40 @@ export const PANEL_STYLES = `
 // ---------------------------------------------------------------------------
 // Main template function
 // ---------------------------------------------------------------------------
+
+// Page navigation for a multi-photo run. Absent entirely for a single photo, so
+// the ordinary panel is unchanged.
+//
+// The buttons move Tropy's own photo selection, not just this panel's view:
+// reviewing page 3 while the image viewer still shows page 1 would be a good way
+// to approve the wrong description.
+function renderPager (run, photoId) {
+  if (!isMultiPhoto(run)) return ''
+
+  const i = photoIndex(run, photoId)
+  const total = run.photos.length
+  const entry = photoEntry(run, photoId)
+
+  const state = {
+    running: 'analyzing…',
+    failed: entry?.error ? `failed: ${entry.error}` : 'failed',
+    skipped: 'not analyzed',
+    idle: 'waiting'
+  }[entry?.status] || ''
+
+  return `
+      <div class="autropy-pager">
+        <button class="autropy-pager__step" id="autropy-prev"${
+  i <= 0 ? ' disabled' : ''} title="Previous page">&#9664;</button>
+        <span class="autropy-pager__position">Page ${i + 1} of ${total}</span>
+        <button class="autropy-pager__step" id="autropy-next"${
+  i >= total - 1 ? ' disabled' : ''} title="Next page">&#9654;</button>
+        <span class="autropy-pager__state">${escapeHtml(state)}</span>
+        <span class="autropy-actions__spacer"></span>
+        <span class="autropy-pager__progress" id="autropy-progress">${
+  escapeHtml(progressLabel(run))}</span>
+      </div>`
+}
 
 // The banner an applied run carries instead of its controls.
 //
@@ -780,6 +877,7 @@ export function buildPanelHTML ({
         <span class="autropy-header__type">${escapeHtml(docType)}</span>
         <span class="autropy-header__confidence">${confidencePct}</span>
       </div>
+      ${renderPager(run, photoId)}
       ${renderAppliedBanner(run)}
 
       <textarea
@@ -799,6 +897,7 @@ export function buildPanelHTML ({
       <div class="autropy-actions">
         ${picker}
         <span class="autropy-actions__spacer"></span>
+        <button class="autropy-btn" id="autropy-stop" hidden>Stop</button>
         ${actions}
       </div>
     </div>`

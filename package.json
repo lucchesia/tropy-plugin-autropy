@@ -1,7 +1,7 @@
 {
   "name": "tropy-plugin-autropy",
   "productName": "Autropy",
-  "version": "0.2.0-alpha.1",
+  "version": "0.3.0-alpha.1",
   "description": "Multimodal AI analysis for Tropy: suggests tags and descriptions with researcher review.",
   "author": "Anita Lucchesi",
   "homepage": "https://github.com/lucchesia/tropy-plugin-autropy",

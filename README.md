@@ -21,6 +21,34 @@ From the review panel you can:
 
 Nothing is written to your project until you press **Apply accepted**.
 
+### Multi-page items
+
+When an item has more than one photo, Autropy asks before it spends anything:
+
+> This item has 6 photos, and you are on photo 2.
+> Analyzing all of them makes 5 new request(s) to the model; 1 page(s) were already
+> analyzed with this model and prompt and will be reused without being billed again.
+>
+> **[Analyze all 6 photos] [Only this photo] [Cancel]**
+
+Pages are analyzed **one at a time**, and the panel gains a pager — `◀ Page 3 of 6 ▶` — with a
+running count. The first page to finish opens the panel, so you can start reading while the rest
+run. Paging moves Tropy's own photo selection too, so you are always looking at the page you are
+reviewing.
+
+**Stop** appears while a run is in flight. It keeps every page already analyzed and makes no further
+requests.
+
+A page that fails does not end the run: it is marked failed in the pager, the others continue, and
+the panel says how many did not work. Failed and unreached pages write nothing.
+
+Each page keeps its own summary, editable independently, and **Apply accepted** writes one note per
+page. Tags are pooled across the whole item and de-duplicated.
+
+**Metadata is not suggested per page.** Tropy keeps one value per field, so six pages proposing six
+descriptions would mean the last one silently wins. Item metadata will come from an item-level
+summary instead; single-photo items are unaffected and still suggest metadata as before.
+
 ### Comparing models
 
 Set **Other model IDs to offer** in Preferences and the review panel gains a model picker. Pick one
@@ -270,7 +298,8 @@ On startup AUTROPY logs one line naming the Tropy version, the route shape and t
 
 ## Known limitations
 
-- **Only the active photo is analyzed.** Multi-page items are not yet supported; you analyze one photo at a time.
+- **No item-level summary yet.** Multi-page items are analyzed page by page, but nothing yet reads those pages together to propose one description for the whole item — which is also why metadata is not suggested for multi-page items.
+- **One item at a time.** Selecting several items still analyzes only the one you are viewing.
 - **No local/offline model support** in this release — see [Local models](#local-models--not-supported-in-this-release).
 - **TIFF images are rejected** rather than transcoded.
 - **"File → Export → Autropy" is a misleading label.** This is analysis, not export. Tropy derives the label from the plugin name and only exposes import, export, extract and transcribe hooks, so an item-scoped action has nowhere else to live. `tropy-plugin-segmenter` documents the same constraint; it needs a change in Tropy itself.
