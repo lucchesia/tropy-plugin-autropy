@@ -21,6 +21,24 @@ From the review panel you can:
 
 Nothing is written to your project until you press **Apply accepted**.
 
+### After you apply
+
+Once something has been written, the panel becomes a **receipt** rather than a form. Re-opening it
+shows what was written, when, and by which model — and offers only **Close** and **Re-analyze**.
+
+That is deliberate. Notes are the one thing AUTROPY writes that cannot be written twice safely, and
+an applied panel that still looked editable was how a second **Apply accepted** came to add a second
+note for the same analysis.
+
+**Re-analyze** asks the model again and starts a fresh review. It is a new analysis, so applying it
+adds to what is already on the item rather than replacing it — the panel says so when that is the
+case.
+
+If a write's outcome is *uncertain* — the connection to Tropy dropped at the wrong moment, so it may
+or may not have been saved — AUTROPY will not repeat it and will not offer to. It names what to
+check instead. Every note carries the id of the run that wrote it, so searching your notes for
+`run <id>` finds it.
+
 ---
 
 ## Human in the loop — by design

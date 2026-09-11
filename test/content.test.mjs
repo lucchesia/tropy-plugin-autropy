@@ -8,6 +8,7 @@ import { escapeAttr, escapeHtml, textToParagraphs } from '../src/html.js'
 import { normalizeTags, validateResult } from '../src/result-schema.js'
 import { flattenMetadata, toMetadataPayload } from '../src/dc.js'
 import { PANEL_STYLES, buildPanelHTML, renderStatusLines } from '../src/panel-template.js'
+import { createRun, setResult } from '../src/run.js'
 
 // ── escaping ───────────────────────────────────────────────────────────────
 
@@ -203,13 +204,29 @@ const LONG_DESCRIPTION =
   'of arterial rupture, son of Bernat Theodor Chieger and Rosa Chieger.'
 
 function panel () {
+  const run = createRun({
+    projectPath: '/tmp/scratch.tropy',
+    itemId: 818,
+    model: 'claude-sonnet-5',
+    photoIds: [819]
+  })
+
+  setResult(run, 819, {
+    result: {
+      summary: 'A death record.',
+      document_type: 'administrative_document',
+      possible_tags: ['Chieger Karl', 'Catalogados'],
+      metadata_suggestions: { title: 'Óbito — Carlos Chieger', description: LONG_DESCRIPTION },
+      confidence: 0.9
+    }
+  })
+
   return buildPanelHTML({
-    summary: 'A death record.',
-    document_type: 'administrative_document',
-    possible_tags: ['Chieger Karl', 'Catalogados'],
-    metadata_suggestions: { title: 'Óbito — Carlos Chieger', description: LONG_DESCRIPTION },
-    confidence: 0.9
-  }, ['Chieger Karl'], true)
+    run,
+    photoId: 819,
+    existingTagNames: ['Chieger Karl'],
+    suggestMetadata: true
+  })
 }
 
 test('the panel clips horizontally instead of spilling into Tropy', () => {

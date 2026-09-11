@@ -99,7 +99,11 @@ test('load() is driven from the constructor, because Tropy has no load hook', ()
   // until the export menu had been used once.
   const source = readFileSync(PLUGIN_SOURCE, 'utf8')
   const ctor = source.indexOf('constructor (options, context)')
-  const body = source.slice(ctor, source.indexOf('#state = {', ctor))
+  const end = source.indexOf('#current = null', ctor)
+
+  assert.ok(end > ctor, 'expected the field block to follow the constructor')
+
+  const body = source.slice(ctor, end)
 
   assert.match(body, /this\.load\(\)/)
   assert.match(body, /\.catch\(/, 'an unhandled rejection here loses the plugin silently')
@@ -107,18 +111,22 @@ test('load() is driven from the constructor, because Tropy has no load hook', ()
 
 test('a refused panel does not leave state and a nav subscription behind', () => {
   const source = readFileSync(PLUGIN_SOURCE, 'utf8')
-  const show = source.indexOf('#showResult (entry')
-  const body = source.slice(show, show + 900)
+  const open = source.indexOf('#openPanel (run, photoId)')
 
-  assert.match(body, /if \(!this\.#injectPanel\(/)
+  assert.ok(open > 0, 'expected #openPanel to exist')
+
+  const body = source.slice(open, open + 400)
+
+  assert.match(body, /if \(!this\.#injectPanel\([^)]*\)\) return/)
 })
 
 test('ancestor scroll is put back after the panel is wired', () => {
   const source = readFileSync(PLUGIN_SOURCE, 'utf8')
 
-  const wire = source.indexOf('this.#wirePanelEvents()\n')
+  const wire = source.indexOf('this.#wirePanelEvents(')
   const unscroll = source.indexOf('this.#unscrollAncestors(')
 
+  assert.ok(wire > 0, 'expected #wirePanelEvents to be called')
   assert.ok(unscroll > 0, 'expected #unscrollAncestors to be called')
   assert.ok(unscroll > wire, 'it has to run after wiring, which is what focuses')
 })

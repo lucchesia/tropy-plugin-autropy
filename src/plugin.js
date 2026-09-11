@@ -34,6 +34,33 @@ import { readPhotoUnprocessed, renderPhoto } from './image.js'
 import { buildPrompt } from './prompt.js'
 import { buildPanelHTML, renderStatusLines } from './panel-template.js'
 import { escapeHtml, textToParagraphs } from './html.js'
+import {
+  ACKNOWLEDGED as OP_ACKNOWLEDGED,
+  COMPLETE as COMPLETE_LEDGER,
+  PENDING as OP_PENDING,
+  REJECTED as OP_REJECTED,
+  UNKNOWN as OP_UNKNOWN,
+  appliedSummary,
+  collectWrites,
+  createRun,
+  digest,
+  imageFingerprint,
+  isLocked,
+  ledgerState,
+  metadataOp,
+  noteOp,
+  photoCacheKey,
+  photoEntry,
+  recordOperation,
+  retryableOperations,
+  runCacheKey,
+  setFailed,
+  setResult,
+  setSummaryDraft,
+  tagOp,
+  toggleField,
+  toggleTag
+} from './run.js'
 
 const AUTROPY_NOTE_MARKER = '[AUTROPY]'
 
@@ -74,20 +101,33 @@ class AutropyPlugin {
     })
   }
 
-  #state = { itemId: null, photoId: null, result: null, existingTags: [] }
+  // What is on screen: which run, and which of its photos. Everything the
+  // researcher decides lives in the run, not here and not in the DOM.
+  #current = null              // { run, photoId } while a panel is open
   #loaded = false
   #panelInjected = false
   #toolbarInjected = false
   #domObserver = null
   #navUnsub = null
-  #analysisCache = new Map()   // photoId → cached analysis, avoids paying twice
+
+  // Two caches, because they answer different questions.
+  //
+  //   #runs       — the researcher's work: edits, accept decisions, and the
+  //                 ledger of what was written. Keyed per project/item/model.
+  //   #photoCache — the paid-for model output. Keyed on everything that changes
+  //                 the answer, so a changed prompt, tag vocabulary, model or
+  //                 image is a miss rather than a stale hit.
+  //
+  // The old single cache was keyed on photoId alone, which made both mistakes at
+  // once: it served one project's analysis for another project's photo of the
+  // same id, and it replayed an applied analysis as an editable panel.
+  #runs = new Map()
+  #photoCache = new Map()
 
   #containerPosition = null    // Tropy's own inline position, to restore on cleanup
   #gateway = null
   #activeRun = null            // { id, controller, itemId, photoId } while analyzing
   #runCounter = 0
-  #notices = []                // status lines for the panel
-  #retryable = []              // rejected writes only — never notes
 
   // ── Tropy state access ───────────────────────────────────────────────────
 
@@ -231,7 +271,7 @@ class AutropyPlugin {
 
   // ── analysis ─────────────────────────────────────────────────────────────
 
-  async #runAnalysis () {
+  async #runAnalysis ({ force = false } = {}) {
     this.#injectToolbarToggle()
 
     const { logger } = this.context
@@ -261,30 +301,54 @@ class AutropyPlugin {
       return
     }
 
-    const cached = this.#analysisCache.get(photoId)
-    if (cached) {
-      logger.warn(`[AUTROPY] using cached analysis for photo ${photoId}`)
-      this.#notices = cached.notices.slice()
-      this.#showResult(cached, itemId, photoId)
+    const projectPath = this.#projectPath()
+    const key = runCacheKey({ projectPath, itemId, model })
+    const existing = this.#runs.get(key)
+
+    // Reopening an existing run is free and, crucially, faithful: the ledger
+    // comes back with it, so an applied run reopens read-only instead of as a
+    // fresh form that would write a second note.
+    if (existing && !force && photoEntry(existing, photoId)?.status === 'done') {
+      logger.warn(
+        `[AUTROPY] reopening run ${existing.id} for photo ${photoId} ` +
+        `(${ledgerState(existing)})`)
+      this.#openPanel(existing, photoId)
       return
     }
+
+    const run = createRun({ projectPath, itemId, model, photoIds: [photoId] })
+
+    // Re-analysis after something was written is legitimate — the researcher
+    // asked for it — but applying the new run will add a second note rather
+    // than replace the first. Say so rather than let it surprise them.
+    if (existing && isLocked(existing)) {
+      const prior = appliedSummary(existing)
+      run.notices.push({
+        kind: 'info',
+        text: `An earlier run (${existing.model}, ${new Date(prior.at).toLocaleString()}) ` +
+              'already wrote to this item. Applying this one adds to that rather than ' +
+              'replacing it.'
+      })
+    }
+
+    this.#runs.set(key, run)
 
     const runId = ++this.#runCounter
     const controller = new AbortController()
     this.#activeRun = { id: runId, controller, itemId, photoId }
-    this.#notices = []
     this.#watchNav()
 
-    logger.warn(`[AUTROPY] starting analysis — item ${itemId}, photo ${photoId}`)
+    logger.warn(
+      `[AUTROPY] starting analysis — run ${run.id}, item ${itemId}, photo ${photoId}`)
 
     try {
-      const gateway = this.#gatewayFor(this.#projectPath(), port)
+      const gateway = this.#gatewayFor(projectPath, port)
 
       // Both reads only enrich the prompt, so neither is allowed to end the
       // run. Before this, a failing metadata read — which is exactly what
       // Tropy beta.5 caused — aborted the whole analysis with no visible sign.
       const existingTags = await this.#readOrDegrade(
-        () => gateway.getTags(), [],
+        run, () => gateway.getTags(), [],
         'Existing project tags could not be read, so every suggested tag shows as new.')
 
       const existingTagNames = existingTags.map(t => t.name)
@@ -292,11 +356,37 @@ class AutropyPlugin {
       let itemMetadata = null
       if (suggestMetadata) {
         itemMetadata = await this.#readOrDegrade(
-          () => gateway.getMetadata(itemId), null,
+          run, () => gateway.getMetadata(itemId), null,
           'This item\'s existing metadata could not be read, so suggestions may repeat values already recorded.')
       }
 
       const finalPrompt = buildPrompt(prompt, existingTagNames, itemMetadata, outputLanguage)
+
+      run.existingTagNames = existingTagNames
+      run.existingTags = existingTags
+      run.suggestMetadata = suggestMetadata
+
+      // The cache key covers the assembled prompt, so it already reflects the
+      // tag vocabulary and the item's current metadata: fill a field or add a
+      // tag and the next run is a miss, as it should be. `force` skips the
+      // lookup entirely — Re-analyze means re-analyze.
+      const cacheKey = photoCacheKey({
+        projectPath,
+        itemId,
+        photoId,
+        model,
+        promptDigest: digest(finalPrompt),
+        imageFingerprint: imageFingerprint(photo)
+      })
+
+      const cached = force ? null : this.#photoCache.get(cacheKey)
+
+      if (cached) {
+        logger.warn(`[AUTROPY] reusing a paid-for analysis of photo ${photoId}`)
+        setResult(run, photoId, cached)
+        this.#openPanel(run, photoId)
+        return
+      }
 
       // Downscale and re-encode via Tropy's own sharp. Sending the original is
       // what made a 9 MB scan fail: base64 inflates it past the provider's
@@ -332,22 +422,16 @@ class AutropyPlugin {
         return
       }
 
-      const entry = {
-        result,
-        existingTagNames,
-        existingTags,
-        suggestMetadata,
-        notices: this.#notices.slice()
-      }
-
-      this.#analysisCache.set(photoId, entry)
-      this.#showResult(entry, itemId, photoId)
+      this.#photoCache.set(cacheKey, { result })
+      setResult(run, photoId, { result })
+      this.#openPanel(run, photoId)
     } catch (err) {
       if (controller.signal.aborted) {
         logger.warn('[AUTROPY] analysis cancelled')
         return
       }
 
+      setFailed(run, photoId, err)
       logger.error({ stack: err.stack }, `[AUTROPY] analysis failed: ${err.message}`)
       this.#fatal('Autropy could not analyze this photo', err.message)
     } finally {
@@ -355,33 +439,24 @@ class AutropyPlugin {
     }
   }
 
-  // Runs a prompt-enriching read, downgrading failure to a notice.
-  async #readOrDegrade (read, fallback, notice) {
+  // Runs a prompt-enriching read, downgrading failure to a notice on the run.
+  async #readOrDegrade (run, read, fallback, notice) {
     try {
       return await read()
     } catch (err) {
       this.context.logger.warn(`[AUTROPY] degraded read: ${err.message}`)
-      this.#notices.push({ kind: 'info', text: notice })
+      run.notices.push({ kind: 'info', text: notice })
       return fallback
     }
   }
 
-  #showResult (entry, itemId, photoId) {
-    // #injectPanel clears #state via #removePanel, so #state is set afterwards;
-    // the Apply handler and the nav watcher both read it. When it refuses
-    // there is nothing to hold state for — it has already reported why — and
-    // subscribing to navigation without a panel would only schedule a
-    // #removePanel for a panel that does not exist.
-    if (!this.#injectPanel(entry.result, entry.existingTagNames, entry.suggestMetadata)) {
-      return
-    }
+  // Puts a run on screen. `#current` is set after injection because the panel
+  // may refuse — it reports why itself, and subscribing to navigation without a
+  // panel would only schedule a #closePanel for a panel that does not exist.
+  #openPanel (run, photoId) {
+    if (!this.#injectPanel(run, photoId)) return
 
-    this.#state = {
-      itemId,
-      photoId,
-      result: entry.result,
-      existingTags: entry.existingTags || []
-    }
+    this.#current = { run, photoId }
     this.#watchNav()
     this.#renderStatus()
   }
@@ -450,8 +525,8 @@ class AutropyPlugin {
 
   // Injects into `.esper-container` (stable across React re-renders) as an
   // absolutely positioned child. Injecting as a flex sibling breaks the layout.
-  #injectPanel (result, existingTagNames, suggestMetadata) {
-    this.#removePanel()
+  #injectPanel (run, photoId) {
+    this.#closePanel()
 
     // The analysis is already cached by this point, so refusing here costs
     // nothing: clicking the icon in the item view replays it without a second
@@ -478,7 +553,7 @@ class AutropyPlugin {
 
     // The panel is an absolute overlay, so the container has to be a positioned
     // ancestor. This mutates one of Tropy's own elements, so remember what was
-    // there and put it back in #removePanel — leaving a host app's layout
+    // there and put it back in #closePanel — leaving a host app's layout
     // permanently altered is how the image viewer ends up misbehaving after the
     // panel is gone.
     if (getComputedStyle(container).position === 'static') {
@@ -487,7 +562,12 @@ class AutropyPlugin {
     }
 
     const wrapper = document.createElement('div')
-    wrapper.innerHTML = buildPanelHTML(result, existingTagNames, suggestMetadata)
+    wrapper.innerHTML = buildPanelHTML({
+      run,
+      photoId,
+      existingTagNames: run.existingTagNames || [],
+      suggestMetadata: run.suggestMetadata ?? this.options.suggestMetadata
+    })
 
     if (!document.getElementById('autropy-styles')) {
       document.head.appendChild(wrapper.querySelector('style'))
@@ -497,17 +577,21 @@ class AutropyPlugin {
     container.appendChild(panel)
     this.#panelInjected = true
 
-    this.#wirePanelEvents()
+    this.#wirePanelEvents(panel, run, photoId)
 
     // After wiring, because wiring focuses the summary.
     this.#unscrollAncestors(panel)
 
-    this.context.logger.warn('[AUTROPY] review panel injected into .esper-container')
+    this.context.logger.warn(
+      `[AUTROPY] review panel injected — run ${run.id}, ${ledgerState(run)}`)
 
     return true
   }
 
-  #wirePanelEvents () {
+  // `panel` is passed in and every lookup is scoped to it. These queries used to
+  // run against the whole document, which happened to work only because exactly
+  // one panel exists at a time.
+  #wirePanelEvents (panel, run, photoId) {
     // Keyboard isolation. Esper registers onKeyDown on section.esper via React
     // synthetic events and has no editable-field check, so without this every
     // keystroke in the textarea also triggers an image shortcut. Events that
@@ -520,16 +604,21 @@ class AutropyPlugin {
       e.stopImmediatePropagation()
     }
 
-    const panel = document.getElementById('autropy-panel')
-    if (panel) {
-      panel.addEventListener('keydown', blockEsper)
-      panel.addEventListener('keyup', blockEsper)
-    }
+    panel.addEventListener('keydown', blockEsper)
+    panel.addEventListener('keyup', blockEsper)
 
-    const summary = document.getElementById('autropy-summary')
+    const locked = isLocked(run)
+
+    const summary = panel.querySelector('#autropy-summary')
     if (summary) {
       summary.addEventListener('keydown', blockEsper)
       summary.addEventListener('keyup', blockEsper)
+
+      // Every keystroke goes into the run. Reading the textarea only at Apply
+      // time meant an edit was lost the moment anything re-rendered the panel.
+      summary.addEventListener('input', () => {
+        setSummaryDraft(run, photoId, summary.value)
+      })
       // Without focus here, focus stays on section.esper and all keys are
       // treated as image shortcuts.
       //
@@ -541,37 +630,54 @@ class AutropyPlugin {
       summary.focus({ preventScroll: true })
     }
 
-    document.querySelectorAll('.autropy-chip').forEach(chip => {
-      chip.addEventListener('click', () => {
-        chip.dataset.accepted = String(chip.dataset.accepted !== 'true')
+    if (!locked) {
+      panel.querySelectorAll('.autropy-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          toggleTag(run, photoId, chip.dataset.tag)
+          chip.dataset.accepted = String(
+            !!photoEntry(run, photoId)?.accept.tags.includes(chip.dataset.tag))
+        })
+        chip.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            chip.click()
+          }
+        })
       })
-      chip.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          chip.click()
-        }
-      })
-    })
 
-    document.querySelectorAll('.autropy-meta-row__accept').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const row = btn.closest('.autropy-meta-row')
-        if (!row) return
-        const accepted = row.dataset.accepted === 'true'
-        row.dataset.accepted = String(!accepted)
-        btn.textContent = accepted ? 'Accept' : 'Undo'
-      })
-    })
+      panel.querySelectorAll('.autropy-meta-row__accept').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const row = btn.closest('.autropy-meta-row')
+          if (!row) return
 
-    document.getElementById('autropy-apply')?.addEventListener('click', () => {
-      this.#applyAccepted().catch(err => {
+          toggleField(run, photoId, row.dataset.field)
+
+          // Re-read from the run rather than flipping the attribute, so the
+          // markup can never drift from the state Apply will actually use.
+          const accepted = !!photoEntry(run, photoId)
+            ?.accept.fields.includes(row.dataset.field)
+          row.dataset.accepted = String(accepted)
+          btn.textContent = accepted ? 'Undo' : 'Accept'
+        })
+      })
+    }
+
+    panel.querySelector('#autropy-apply')?.addEventListener('click', () => {
+      this.#applyAccepted(run, photoId).catch(err => {
         this.context.logger.error({ stack: err.stack }, `[AUTROPY] apply failed: ${err.message}`)
-        this.#notices.push({ kind: 'warn', text: err.message })
+        run.notices.push({ kind: 'warn', text: err.message })
         this.#renderStatus()
       })
     })
 
-    document.getElementById('autropy-dismiss')?.addEventListener('click', () => {
+    panel.querySelector('#autropy-reanalyze')?.addEventListener('click', () => {
+      this.#runAnalysis({ force: true }).catch(err => {
+        this.context.logger.error(
+          { stack: err.stack }, `[AUTROPY] re-analysis failed: ${err.message}`)
+      })
+    })
+
+    panel.querySelector('#autropy-dismiss')?.addEventListener('click', () => {
       this.#dismissPanel()
     })
   }
@@ -587,7 +693,7 @@ class AutropyPlugin {
     this.#navUnsub?.()
     this.#navUnsub = null
 
-    if (!this.#activeRun && !this.#state.photoId) return
+    if (!this.#activeRun && !this.#current) return
 
     const check = () => {
       const state = this.#getState()
@@ -595,17 +701,17 @@ class AutropyPlugin {
 
       const { itemId, photoId } = this.#readNav(state)
 
-      const run = this.#activeRun
-      if (run && (run.photoId !== photoId || run.itemId !== itemId)) {
+      const active = this.#activeRun
+      if (active && (active.photoId !== photoId || active.itemId !== itemId)) {
         this.context.logger.warn('[AUTROPY] navigation changed during analysis — cancelling')
-        run.controller.abort()
+        active.controller.abort()
         this.#activeRun = null
       }
 
-      if (this.#panelInjected && this.#state.photoId &&
-          (this.#state.photoId !== photoId || this.#state.itemId !== itemId)) {
+      if (this.#panelInjected && this.#current &&
+          (this.#current.photoId !== photoId || this.#current.run.itemId !== itemId)) {
         this.context.logger.warn('[AUTROPY] navigation changed — closing stale panel')
-        this.#removePanel()
+        this.#closePanel()
       }
     }
 
@@ -622,18 +728,20 @@ class AutropyPlugin {
   // ── status area ──────────────────────────────────────────────────────────
 
   #renderStatus () {
+    const run = this.#current?.run
     const area = document.getElementById('autropy-status')
-    if (!area) return
+    if (!area || !run) return
 
-    area.innerHTML = renderStatusLines(this.#notices)
+    area.innerHTML = renderStatusLines(run.notices)
 
-    if (this.#retryable.length > 0) {
+    const retryable = retryableOperations(run)
+    if (retryable.length > 0) {
       const retry = document.createElement('button')
       retry.className = 'autropy-btn'
       retry.id = 'autropy-retry'
-      retry.textContent = `Retry ${this.#retryable.length} failed write(s)`
+      retry.textContent = `Retry ${retryable.length} refused write(s)`
       retry.addEventListener('click', () => {
-        this.#applyAccepted({ only: this.#retryable.slice() }).catch(err => {
+        this.#applyAccepted(run, this.#current.photoId, { retryOnly: true }).catch(err => {
           this.context.logger.error({ stack: err.stack }, `[AUTROPY] retry failed: ${err.message}`)
         })
       })
@@ -641,18 +749,22 @@ class AutropyPlugin {
     }
   }
 
-  // Turns a gateway outcome into a status line, and records it for retry when —
-  // and only when — repeating it is safe.
-  #recordOutcome (outcome, { retry } = {}) {
+  // Turns a gateway outcome into a ledger entry and a status line.
+  //
+  // The ledger entry is the part that matters: it is written the moment the
+  // outcome is known, so a run that dies between two writes still knows which
+  // of them landed.
+  #recordOutcome (run, { key, kind, outcome }) {
     if (!outcome) return
 
-    const { status, describe, detail, targetChanged } = outcome
+    const { status, describe, detail, targetChanged, noteId } = outcome
 
     if (status === ACKNOWLEDGED) {
-      this.#notices.push({ kind: 'ok', text: `Done: ${describe}.` })
+      recordOperation(run, { key, kind, status: OP_ACKNOWLEDGED, describe, noteId })
+      run.notices.push({ kind: 'ok', text: `Done: ${describe}.` })
 
       if (targetChanged) {
-        this.#notices.push({
+        run.notices.push({
           kind: 'unknown',
           text: 'The frontmost project changed during this write — please confirm ' +
                 'it landed in the project you meant.'
@@ -662,15 +774,17 @@ class AutropyPlugin {
     }
 
     if (status === REJECTED) {
-      this.#notices.push({ kind: 'warn', text: `Tropy refused: ${describe} (${detail}).` })
-      if (retry) this.#retryable.push(retry)
+      recordOperation(run, { key, kind, status: OP_REJECTED, describe, detail })
+      run.notices.push({ kind: 'warn', text: `Tropy refused: ${describe} (${detail}).` })
       return
     }
 
     if (status === UNKNOWN) {
-      // No retry offered. A note that may already exist must not be written
-      // twice, and we cannot tell from here whether it landed.
-      this.#notices.push({
+      // Terminal. A note that may already exist must not be written twice, and
+      // nothing observable from here distinguishes a write that never landed
+      // from one whose acknowledgement was lost on the way back.
+      recordOperation(run, { key, kind, status: OP_UNKNOWN, describe, detail })
+      run.notices.push({
         kind: 'unknown',
         text: `Unconfirmed: ${describe}. The connection to Tropy dropped, so this ` +
               'may or may not have been saved — check in Tropy before trying again.'
@@ -680,9 +794,9 @@ class AutropyPlugin {
 
   // ── apply ────────────────────────────────────────────────────────────────
 
-  async #applyAccepted ({ only = null } = {}) {
+  async #applyAccepted (run, photoId, { retryOnly = false } = {}) {
     const { logger } = this.context
-    const { itemId, photoId } = this.#state
+    const { itemId } = run
     const port = resolvePort(this.options.port)
 
     if (!itemId || !photoId) {
@@ -697,11 +811,11 @@ class AutropyPlugin {
         'Nothing was written',
         'The photo on screen is no longer the one that was analyzed, so Autropy ' +
         'stopped rather than write to the wrong item. Re-run the analysis.')
-      this.#removePanel()
+      this.#closePanel()
       return
     }
 
-    const gateway = this.#gatewayFor(this.#projectPath(), port)
+    const gateway = this.#gatewayFor(run.projectPath, port)
 
     try {
       await gateway.assertWriteTarget()
@@ -711,76 +825,119 @@ class AutropyPlugin {
       return
     }
 
-    this.#retryable = []
-    if (!only) this.#notices = this.#notices.filter(n => n.kind === 'info')
+    // Outcome lines are rebuilt each pass; the informational notices from the
+    // analysis stay, because they still describe how these suggestions were
+    // produced.
+    run.notices = run.notices.filter(n => n.kind === 'info')
 
-    const tagNames = only
-      ? only.filter(r => r.kind === 'tag').map(r => r.name)
-      : [...document.querySelectorAll('.autropy-chip[data-accepted="true"]')]
-          .map(chip => chip.dataset.tag)
+    // What may be written is decided by the ledger, not by the DOM and not by a
+    // flag. An acknowledged or unknown note is never re-emitted, which is what
+    // makes a duplicate note impossible rather than merely unlikely.
+    const { notes, tags, fields } = collectWrites(run)
 
-    const acceptedMeta = only
-      ? Object.assign({}, ...only.filter(r => r.kind === 'metadata').map(r => r.fields))
-      : Object.fromEntries(
-          [...document.querySelectorAll('.autropy-meta-row[data-accepted="true"]')]
-            .map(row => [
-              row.dataset.field,
-              row.querySelector('.autropy-meta-row__value')?.textContent
-            ])
-            .filter(([field, value]) => field && value))
-
-    const summary = document.getElementById('autropy-summary')?.value || ''
+    if (retryOnly && notes.length === 0 && tags.length === 0 &&
+        Object.keys(fields).length === 0) {
+      run.notices.push({ kind: 'info', text: 'Nothing left that is safe to retry.' })
+      this.#renderStatus()
+      return
+    }
 
     // Re-read tags so tag ids are current — another window or a manual edit may
     // have created one of these names since the analysis ran.
     const existingTags = await this.#readOrDegrade(
-      () => gateway.getTags(), [],
+      run, () => gateway.getTags(), [],
       'Existing tags could not be re-read; a tag may be created that already exists.')
 
-    for (const tagName of tagNames) {
+    for (const tagName of tags) {
+      recordOperation(run, { key: tagOp(tagName), kind: 'tag', status: OP_PENDING })
       const outcome = await gateway.applyTag(itemId, tagName, existingTags)
-      this.#recordOutcome(outcome, { retry: { kind: 'tag', name: tagName } })
+      this.#recordOutcome(run, { key: tagOp(tagName), kind: 'tag', outcome })
     }
 
-    // Notes are written only on a first apply: they are the one non-idempotent
-    // write here, so a retry pass must never repeat one.
-    if (!only) {
-      const html = this.#buildNoteHtml(summary)
-      if (html) {
-        const outcome = await gateway.createNote(photoId, html)
-        this.#recordOutcome(outcome)
-        if (outcome.status === ACKNOWLEDGED && outcome.noteId) {
-          logger.warn(`[AUTROPY] note ${outcome.noteId} written to photo ${photoId}`)
-        }
+    for (const note of notes) {
+      const html = this.#buildNoteHtml(run, note.text)
+      if (!html) continue
+
+      const key = noteOp(note.photoId)
+      recordOperation(run, { key, kind: 'note', status: OP_PENDING })
+
+      const outcome = await gateway.createNote(note.photoId, html)
+      this.#recordOutcome(run, { key, kind: 'note', outcome })
+
+      if (outcome.status === ACKNOWLEDGED && outcome.noteId) {
+        logger.warn(`[AUTROPY] note ${outcome.noteId} written to photo ${note.photoId}`)
       }
     }
 
-    if (Object.keys(acceptedMeta).length > 0) {
-      const outcome = await gateway.saveMetadata(itemId, acceptedMeta)
-      this.#recordOutcome(outcome, { retry: { kind: 'metadata', fields: acceptedMeta } })
+    if (Object.keys(fields).length > 0) {
+      const key = metadataOp(itemId)
+      recordOperation(run, { key, kind: 'metadata', status: OP_PENDING })
+
+      const outcome = await gateway.saveMetadata(itemId, fields)
+
+      if (outcome) {
+        this.#recordOutcome(run, { key, kind: 'metadata', outcome })
+      } else {
+        // saveMetadata returns null when every accepted field was dropped as
+        // unwritable. That used to pass through #recordOutcome's null guard and
+        // leave no trace at all — an accepted row that silently did nothing.
+        recordOperation(run, {
+          key,
+          kind: 'metadata',
+          status: OP_REJECTED,
+          describe: `saving metadata on item ${itemId}`,
+          detail: 'none of the accepted fields can be written to Tropy'
+        })
+        run.notices.push({
+          kind: 'warn',
+          text: 'None of the accepted metadata fields can be written to Tropy, so ' +
+                'nothing was saved for them.'
+        })
+      }
     }
 
-    const unresolved = this.#notices.some(n => n.kind === 'warn' || n.kind === 'unknown')
+    const state = ledgerState(run)
 
-    if (unresolved) {
+    if (state !== COMPLETE_LEDGER) {
       // Keep the panel open: the researcher needs to see what did and did not
       // land, and closing it would discard the only record of that.
-      this.#renderStatus()
-      logger.warn(`[AUTROPY] apply finished with unresolved writes — item ${itemId}`)
+      this.#renderPanelInPlace(run, photoId)
+      logger.warn(
+        `[AUTROPY] apply finished ${state} — run ${run.id}, item ${itemId}`)
       return
     }
 
-    logger.warn(`[AUTROPY] apply complete — item ${itemId}`)
-    this.#removePanel()
+    logger.warn(`[AUTROPY] apply complete — run ${run.id}, item ${itemId}`)
+
+    // Re-rendered rather than closed, so the panel becomes the receipt: what was
+    // written, when, and by which model. Closing it here is what let a second
+    // Apply look like a first one.
+    this.#renderPanelInPlace(run, photoId)
   }
 
-  #buildNoteHtml (summary) {
+  // Rebuilds the panel from the run without touching the caches, so a locked run
+  // picks up its read-only rendering and its banner.
+  #renderPanelInPlace (run, photoId) {
+    if (this.#injectPanel(run, photoId)) {
+      this.#current = { run, photoId }
+      this.#watchNav()
+      this.#renderStatus()
+    }
+  }
+
+  #buildNoteHtml (run, summary) {
     const body = textToParagraphs(summary)
     if (!body) return null
 
+    // `run.model` and not `this.options.model`: the preference can have changed
+    // since the analysis ran, and a note that names the wrong model is a
+    // provenance error in the researcher's own data.
+    //
+    // The run id is here so an `unknown` write can be found by hand — it is the
+    // one outcome Autropy refuses to resolve on the researcher's behalf.
     const provenance =
-      `${AUTROPY_NOTE_MARKER} model: ${this.options.model} | ` +
-      `${new Date().toISOString()} | v${AUTROPY_VERSION}`
+      `${AUTROPY_NOTE_MARKER} model: ${run.model} | ` +
+      `${new Date().toISOString()} | v${AUTROPY_VERSION} | run ${run.id}`
 
     return `${body}<p>---<br>${escapeHtml(provenance)}</p>`
   }
@@ -788,20 +945,26 @@ class AutropyPlugin {
   // ── teardown ─────────────────────────────────────────────────────────────
 
   #dismissPanel () {
+    const run = this.#current?.run
     this.context.logger.warn(
-      `[AUTROPY] dismissed — item ${this.#state.itemId}, nothing written`)
-    this.#removePanel()
+      `[AUTROPY] panel closed — item ${run?.itemId ?? 'none'}, ledger ` +
+      `${run ? ledgerState(run) : 'none'}`)
+    this.#closePanel()
   }
 
-  #removePanel () {
+  // Closes the panel without destroying the run.
+  //
+  // This used to be #removePanel, and it wiped the researcher's decisions, the
+  // status notices and any record of what had been written — which is why a
+  // re-opened panel came back as a blank form and a second Apply wrote a second
+  // note. The run outlives its panel now; only the DOM goes.
+  #closePanel () {
     this.#navUnsub?.()
     this.#navUnsub = null
     document.getElementById('autropy-panel')?.remove()
     this.#restoreContainerPosition()
     this.#panelInjected = false
-    this.#notices = []
-    this.#retryable = []
-    this.#state = { itemId: null, photoId: null, result: null, existingTags: [] }
+    this.#current = null
   }
 
   #restoreContainerPosition () {
@@ -900,7 +1063,8 @@ class AutropyPlugin {
     this.#domObserver = null
     this.#navUnsub?.()
     this.#navUnsub = null
-    this.#analysisCache.clear()
+    this.#runs.clear()
+    this.#photoCache.clear()
     this.#gateway = null
     // The button is wrapped in a tool-group we created — remove the wrapper.
     document.getElementById('autropy-toggle')?.closest('.tool-group')?.remove()

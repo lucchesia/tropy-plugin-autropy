@@ -16,6 +16,15 @@
 //   inside .esper-container. max-height:60% prevents panel from eclipsing the full image
 
 import { escapeAttr, escapeHtml } from './html.js'
+import {
+  UNCERTAIN,
+  appliedSummary,
+  isFieldAccepted,
+  isLocked,
+  isTagAccepted,
+  photoEntry,
+  uncertainOperations
+} from './run.js'
 
 // ---------------------------------------------------------------------------
 // Chip helpers
@@ -23,18 +32,24 @@ import { escapeAttr, escapeHtml } from './html.js'
 
 // Existing project tags get an outlined style; new AI-suggested tags get a
 // filled style with a leading + to signal they will be created on apply.
-// CONFIRMED: chip accept/reject state is tracked via data-accepted attribute
-//   and toggled by the click handler wired in plugin.js.
-function renderChip (tagName, isExisting) {
+//
+// `data-accepted` is now a projection of the run, not the source of truth. It
+// stays in the markup because the CSS keys off it, but the click handler writes
+// into the run and re-reads from there — a re-render used to silently reset
+// every metadata row and re-accept every chip.
+function renderChip (tagName, isExisting, accepted, locked) {
   const modifier = isExisting ? 'autropy-chip--existing' : 'autropy-chip--new'
   const label = isExisting ? tagName : `+ ${tagName}`
+  const interactive = locked ? '' : ' role="button" tabindex="0"'
+  const title = locked
+    ? (accepted ? 'Written to this item' : 'Not written')
+    : (isExisting ? 'Existing project tag' : 'New tag — will be created on apply')
+
   return `<span
     class="autropy-chip ${modifier}"
     data-tag="${escapeAttr(tagName)}"
-    data-accepted="true"
-    role="button"
-    tabindex="0"
-    title="${isExisting ? 'Existing project tag' : 'New tag — will be created on apply'}"
+    data-accepted="${accepted ? 'true' : 'false'}"${interactive}
+    title="${escapeAttr(title)}"
   >${escapeHtml(label)} <span class="autropy-chip__toggle">&#10003;</span></span>`
 }
 
@@ -50,31 +65,45 @@ function renderChip (tagName, isExisting) {
 //
 // All rows use data-field matching the DC_WRITE_URIS keys in dc.js so that
 // #applyAccepted() can write accepted rows without any additional wiring.
-function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
+function renderMetadataTable (run, photoId, suggestMetadata) {
+  const entry = photoEntry(run, photoId)
+  const result = entry?.result ?? {}
+  const docType = result.document_type || 'unknown'
+  const metadataSuggestions = result.metadata_suggestions
+  const locked = isLocked(run)
+
   const valueCell = value =>
     `<td class="autropy-meta-row__value">${escapeHtml(value)}</td>`
 
-  const typeRow = `
-      <tr class="autropy-meta-row" data-field="type" data-accepted="false">
-        <td class="autropy-meta-row__field">type</td>
-        ${valueCell(docType || 'unknown')}
-        <td class="autropy-meta-row__action">
-          <button class="autropy-meta-row__accept">Accept</button>
-        </td>
+  // When the run is locked there is nothing to accept, so the button is replaced
+  // by a word saying what happened to that field rather than a control that
+  // would either do nothing or invite a duplicate write.
+  const actionCell = (field, accepted) => {
+    if (locked) {
+      return `<td class="autropy-meta-row__action autropy-meta-row__outcome">${
+        accepted ? 'written' : '—'}</td>`
+    }
+    return `<td class="autropy-meta-row__action">
+          <button class="autropy-meta-row__accept">${accepted ? 'Undo' : 'Accept'}</button>
+        </td>`
+  }
+
+  const row = (field, value, accepted) => `
+      <tr class="autropy-meta-row" data-field="${escapeAttr(field)}" data-accepted="${
+  accepted ? 'true' : 'false'}">
+        <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
+        ${valueCell(value)}
+        ${actionCell(field, accepted)}
       </tr>`
+
+  const typeRow = row('type', docType, isFieldAccepted(run, photoId, 'type'))
 
   let extraRows = ''
   if (suggestMetadata && metadataSuggestions && typeof metadataSuggestions === 'object') {
     extraRows = Object.entries(metadataSuggestions)
       .filter(([, value]) => value !== null && value !== undefined)
-      .map(([field, value]) => `
-      <tr class="autropy-meta-row" data-field="${escapeAttr(field)}" data-accepted="false">
-        <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
-        ${valueCell(String(value))}
-        <td class="autropy-meta-row__action">
-          <button class="autropy-meta-row__accept">Accept</button>
-        </td>
-      </tr>`)
+      .map(([field, value]) =>
+        row(field, String(value), isFieldAccepted(run, photoId, field)))
       .join('')
   }
 
@@ -179,6 +208,48 @@ export const PANEL_STYLES = `
     box-sizing: border-box;
   }
 
+  /* A run that has been applied is history, not a form. The readonly textarea
+   * keeps the text selectable and copyable while making it obvious that editing
+   * it here would change nothing in Tropy. */
+  #autropy-panel[data-locked="true"] .autropy-summary {
+    background: rgb(240,240,240);
+    color: rgb(90,90,90);
+    cursor: default;
+  }
+
+  .autropy-banner {
+    padding: 6px 8px;
+    border-radius: 3px;
+    border: 1px solid rgb(210,210,210); /* CONFIRMED from DevTools */
+    background: rgb(240,240,240);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .autropy-banner--uncertain {
+    border-color: #b03a3a;
+  }
+
+  .autropy-banner__line {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .autropy-banner__uncertain {
+    margin-top: 4px;
+    font-weight: 500;
+  }
+
+  .autropy-banner__uncertain ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
+  }
+
+  .autropy-meta-row__outcome {
+    padding: 3px 4px;
+    font-size: 11px;
+    color: rgb(128,128,128); /* UNVERIFIED: muted text */
+  }
+
   .autropy-chips {
     display: flex;
     flex-wrap: wrap;
@@ -281,9 +352,15 @@ export const PANEL_STYLES = `
     overflow-wrap: anywhere;
   }
 
+  /* Accepted reads as affirmed, not cancelled.
+   *
+   * This used to be 'text-decoration: line-through; opacity: 0.5', so pressing
+   * Accept struck the value out — which looks exactly like rejecting it. On a
+   * panel where the chips use dimming to mean rejected, the same visual meant
+   * the opposite thing one section lower. */
   .autropy-meta-row[data-accepted="true"] .autropy-meta-row__value {
-    text-decoration: line-through;
-    opacity: 0.5;
+    font-weight: 500;
+    box-shadow: inset 2px 0 0 #5b8dd9;
   }
 
   .autropy-meta-row__accept {
@@ -450,6 +527,24 @@ export const PANEL_STYLES = `
       background: rgb(46,46,46);
     }
 
+    #autropy-panel[data-locked="true"] .autropy-summary {
+      background: rgb(32,32,32);
+      color: rgb(150,150,150);
+    }
+
+    .autropy-banner {
+      border-color: rgb(60,60,60);
+      background: rgb(46,46,46);
+    }
+
+    .autropy-banner--uncertain {
+      border-color: #e88b8b;
+    }
+
+    .autropy-meta-row__outcome {
+      color: rgb(120,120,120);
+    }
+
     .autropy-status__line--ok .autropy-status__mark { color: #7cc98a; }
     .autropy-status__line--warn .autropy-status__mark { color: #e0a06a; }
     .autropy-status__line--unknown .autropy-status__mark { color: #e88b8b; }
@@ -466,50 +561,112 @@ export const PANEL_STYLES = `
 // Main template function
 // ---------------------------------------------------------------------------
 
-// Returns a self-contained HTML string for the review panel.
-// Callers:
-//   result          — parsed AI response { summary, document_type, possible_tags,
-//                     metadata_suggestions, confidence }
-//   existingTagNames — array of tag name strings already in the project
-//   suggestMetadata  — boolean; controls whether the metadata table is rendered
+// The banner an applied run carries instead of its controls.
 //
-// `result` has already passed validateResult(), so possible_tags is an array and
+// A researcher who re-opens a panel needs one question answered before anything
+// else: was this already written? Before this existed the panel looked identical
+// whether or not Apply had run, which is how a second Apply came to write a
+// second note.
+function renderAppliedBanner (run) {
+  const applied = appliedSummary(run)
+  if (!applied) return ''
+
+  const when = new Date(applied.at).toLocaleString()
+  const counts = [
+    `${applied.notes} note${applied.notes === 1 ? '' : 's'}`,
+    `${applied.fields} field${applied.fields === 1 ? '' : 's'}`,
+    `${applied.tags} tag${applied.tags === 1 ? '' : 's'}`
+  ].join(', ')
+
+  let detail = `Applied ${when} · ${applied.model} · ${counts}`
+  if (applied.rejected > 0) detail += ` · ${applied.rejected} refused`
+
+  // The uncertain case is spelled out in full rather than counted. It is the one
+  // outcome Autropy will not resolve on the researcher's behalf, so it has to
+  // say exactly what to look for and where.
+  let uncertain = ''
+  if (applied.state === UNCERTAIN) {
+    const items = uncertainOperations(run)
+      .map(op => `<li>${escapeHtml(op.describe || op.key)}</li>`)
+      .join('')
+    uncertain = `
+        <div class="autropy-banner__uncertain">
+          The connection to Tropy dropped during these writes, so they may or may
+          not have been saved. Check in Tropy before re-running — searching your
+          notes for <code>run ${escapeHtml(run.id)}</code> will find them.
+          <ul>${items}</ul>
+        </div>`
+  }
+
+  return `
+      <div class="autropy-banner autropy-banner--${escapeAttr(applied.state)}">
+        <div class="autropy-banner__line">${escapeHtml(detail)}</div>${uncertain}
+      </div>`
+}
+
+// Returns a self-contained HTML string for the review panel.
+//
+//   run              — the run being reviewed; the source of truth for every
+//                      accept decision, the summary draft and the write ledger
+//   photoId          — which of the run's photos this view shows
+//   existingTagNames — tag names already in the project, for chip styling
+//   suggestMetadata  — whether the metadata suggestion rows are rendered
+//
+// Results have already passed validateResult(), so possible_tags is an array and
 // confidence is either a number in 0–1 or null.
-export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
+export function buildPanelHTML ({ run, photoId, existingTagNames, suggestMetadata }) {
+  const entry = photoEntry(run, photoId)
+  const result = entry?.result ?? {}
   const {
-    summary = '',
     document_type: docType = 'unknown',
     possible_tags: tags = [],
-    metadata_suggestions: metaSuggestions = null,
     confidence = null
   } = result
+
+  const locked = isLocked(run)
 
   const existingSet = new Set(
     (existingTagNames || []).map(n => n.toLowerCase())
   )
 
   const chips = tags.map(tag =>
-    renderChip(tag, existingSet.has(tag.toLowerCase()))
+    renderChip(
+      tag,
+      existingSet.has(tag.toLowerCase()),
+      isTagAccepted(run, photoId, tag),
+      locked)
   ).join('')
 
   // Omitted rather than shown as 0% or NaN% when the model gave no figure.
   const confidencePct = confidence == null ? '' : `${Math.round(confidence * 100)}%`
 
   // Metadata section always rendered (for the type row); extra rows gated by suggestMetadata
-  const metaSection = renderMetadataTable(docType, metaSuggestions, suggestMetadata)
+  const metaSection = renderMetadataTable(run, photoId, suggestMetadata)
+
+  // The draft, not the model's original text: the researcher's edits are the
+  // thing worth preserving across a re-render.
+  const summary = entry?.summaryDraft ?? ''
+
+  const actions = locked
+    ? `<button class="autropy-btn" id="autropy-dismiss">Close</button>
+        <button class="autropy-btn autropy-btn--primary" id="autropy-reanalyze">Re-analyze</button>`
+    : `<button class="autropy-btn" id="autropy-dismiss">Dismiss</button>
+        <button class="autropy-btn autropy-btn--primary" id="autropy-apply">Apply accepted</button>`
 
   return `
     ${PANEL_STYLES}
-    <div id="autropy-panel">
+    <div id="autropy-panel" data-locked="${locked ? 'true' : 'false'}" data-run="${
+  escapeAttr(run.id)}">
       <div class="autropy-header">
         <span class="autropy-header__type">${escapeHtml(docType)}</span>
         <span class="autropy-header__confidence">${confidencePct}</span>
       </div>
+      ${renderAppliedBanner(run)}
 
       <textarea
         id="autropy-summary"
         class="autropy-summary"
-        rows="4"
+        rows="4"${locked ? ' readonly' : ''}
       >${escapeHtml(summary)}</textarea>
 
       <div class="autropy-chips" id="autropy-chips">
@@ -521,8 +678,7 @@ export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
       <div class="autropy-status" id="autropy-status"></div>
 
       <div class="autropy-actions">
-        <button class="autropy-btn" id="autropy-dismiss">Dismiss</button>
-        <button class="autropy-btn autropy-btn--primary" id="autropy-apply">Apply accepted</button>
+        ${actions}
       </div>
     </div>`
 }
