@@ -20,7 +20,11 @@ import {
   canSynthesize,
   collectWrites,
   createRun,
+  isLocked,
+  isSynthesisLocked,
   isSynthesisStale,
+  metadataOp,
+  noteOp,
   recordOperation,
   setFailed,
   setResult,
@@ -30,6 +34,7 @@ import {
   synthesisNoteOp,
   synthesisNotePhoto,
   synthesisSources,
+  tagOp,
   toggleSynthesisField,
   toggleSynthesisNote
 } from '../src/run.js'
@@ -288,4 +293,78 @@ test('the item summary note says it describes the whole item', () => {
     fileURLToPath(new URL('../src/plugin.js', import.meta.url)), 'utf8')
 
   assert.match(text, /Item summary — describes all pages of this item/)
+})
+
+// ── the item summary has its own lock ──────────────────────────────────────
+//
+// The bug: a run locks as soon as anything is written, which is right for the
+// pages. But the natural order of work is analyze → review → apply the page
+// notes → THEN ask for an item summary. Under one shared lock that summary
+// could be generated and never applied — its accept toggles did nothing and the
+// panel offered no Apply. It stayed on screen and went nowhere.
+
+test('the item summary is still editable after the page notes are applied', () => {
+  const run = synthesized(item(4))
+
+  // The pages have been applied.
+  recordOperation(run, { key: noteOp(100), kind: 'note', status: ACKNOWLEDGED })
+  recordOperation(run, { key: tagOp('vatican'), kind: 'tag', status: ACKNOWLEDGED })
+
+  assert.equal(isLocked(run), true, 'the pages are history')
+  assert.equal(isSynthesisLocked(run), false, 'the summary is not')
+
+  toggleSynthesisField(run, 'title')
+  toggleSynthesisNote(run)
+
+  assert.deepEqual(collectWrites(run).fields, { title: 'Dossier Falkenstein' })
+  assert.equal(collectWrites(run).notes.some(n => n.kind === SYNTHESIS), true)
+})
+
+test('a locked run still offers Apply on the item summary view', () => {
+  const run = synthesized(item(4))
+  recordOperation(run, { key: noteOp(100), kind: 'note', status: ACKNOWLEDGED })
+
+  const html = panel(run).split('</style>')[1]
+
+  assert.match(html, /id="autropy-apply"/)
+  assert.match(html, /id="autropy-synthesize"/)
+})
+
+test('the summary locks only once both of its own writes have settled', () => {
+  const run = synthesized(item(4))
+
+  recordOperation(run, { key: synthesisNoteOp(), kind: 'note', status: ACKNOWLEDGED })
+  assert.equal(isSynthesisLocked(run), false, 'metadata can still be accepted')
+
+  recordOperation(run, { key: metadataOp(1), kind: 'metadata', status: ACKNOWLEDGED })
+  assert.equal(isSynthesisLocked(run), true)
+})
+
+test('an identical metadata write is not repeated, but an added field is', () => {
+  const run = synthesized(item(4))
+  toggleSynthesisField(run, 'title')
+
+  const wrote = collectWrites(run).fields
+  recordOperation(run, {
+    key: metadataOp(1), kind: 'metadata', status: ACKNOWLEDGED, wrote
+  })
+
+  assert.deepEqual(collectWrites(run).fields, {}, 'nothing changed, nothing to write')
+
+  toggleSynthesisField(run, 'description')
+
+  assert.deepEqual(collectWrites(run).fields, {
+    title: 'Dossier Falkenstein',
+    description: 'A 1940 dossier of the Secretariat of State.'
+  })
+})
+
+test('an unknown metadata write is never repeated', () => {
+  // It may have landed. Rewriting could overwrite a value corrected since.
+  const run = synthesized(item(4))
+  toggleSynthesisField(run, 'title')
+
+  recordOperation(run, { key: metadataOp(1), kind: 'metadata', status: UNKNOWN })
+
+  assert.deepEqual(collectWrites(run).fields, {})
 })

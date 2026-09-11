@@ -26,6 +26,7 @@ import {
   isLocked,
   isMultiPhoto,
   isSynthesisFieldAccepted,
+  isSynthesisLocked,
   isSynthesisStale,
   isTagAccepted,
   photoEntry,
@@ -820,7 +821,7 @@ function renderPager (run, view) {
 // ---------------------------------------------------------------------------
 
 function renderSynthesis (run) {
-  const locked = isLocked(run)
+  const locked = isSynthesisLocked(run)
   const s = run.synthesis
   const sources = synthesisSources(run)
 
@@ -883,7 +884,7 @@ function renderSynthesis (run) {
 function renderSynthesisTable (run) {
   const s = run.synthesis
   const suggestions = s?.result?.metadata_suggestions
-  const locked = isLocked(run)
+  const locked = isSynthesisLocked(run)
   const stale = isSynthesisStale(run)
   const current = run.itemMetadata || {}
 
@@ -996,8 +997,14 @@ export function buildPanelHTML ({
   // the model picker, so it reads as one more page rather than another screen.
   if (photoId === SYNTHESIS) {
     const stale = isSynthesisStale(run)
-    const actions = locked
-      ? `<button class="autropy-btn" id="autropy-dismiss">Close</button>`
+
+    // Its own lock, not the run's: the pages are usually applied before the
+    // summary is even asked for, and the run-level lock made it impossible to
+    // apply afterwards.
+    const done = isSynthesisLocked(run)
+
+    const actions = done
+      ? '<button class="autropy-btn" id="autropy-dismiss">Close</button>'
       : `<button class="autropy-btn" id="autropy-dismiss">Dismiss</button>
         <button class="autropy-btn${run.synthesis && !stale ? '' : ' autropy-btn--primary'}"
           id="autropy-synthesize">${run.synthesis ? 'Generate again' : 'Generate item summary'}</button>
@@ -1005,7 +1012,7 @@ export function buildPanelHTML ({
 
     return `
     ${PANEL_STYLES}
-    <div id="autropy-panel" data-locked="${locked ? 'true' : 'false'}" data-run="${
+    <div id="autropy-panel" data-locked="${done ? 'true' : 'false'}" data-run="${
   escapeAttr(run.id)}" data-view="synthesis">
       ${renderPager(run, SYNTHESIS)}
       ${renderAppliedBanner(run)}

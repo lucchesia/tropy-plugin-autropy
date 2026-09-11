@@ -61,7 +61,17 @@ export const DEFAULT_PROMPT = `${ANALYSIS_INSTRUCTIONS}\n\n${JSON_FORMAT_BLOCK}`
 // outputLanguage: if set, appends a language instruction for prose output.
 //   JSON keys and field names always remain in English regardless of this setting.
 // ---------------------------------------------------------------------------
-export function buildPrompt (userPrompt, existingTags, itemMetadata, outputLanguage) {
+// transcription: the photo's existing transcription text, or null.
+//
+//   Appended on BOTH the default and custom-prompt paths, unlike the tag and
+//   metadata hints. It is source material, not prompt tuning: the default
+//   instructions already say "if a transcription is available, treat it as the
+//   primary source for textual content", and for months nothing supplied one —
+//   so every analysis of a transcribed page opened by announcing that no
+//   transcription was available and read the handwriting from the image instead.
+export function buildPrompt (
+  userPrompt, existingTags, itemMetadata, outputLanguage, transcription = null
+) {
   let instructionBlock
 
   if (userPrompt && userPrompt.trim().length > 0) {
@@ -97,8 +107,21 @@ export function buildPrompt (userPrompt, existingTags, itemMetadata, outputLangu
     }
   }
 
+  // The transcription goes in before the format block, on both paths. Labelled
+  // as machine-produced and possibly imperfect, because it usually is — it is
+  // OCR or HTR output, and a model told to treat it as authoritative will
+  // confidently repeat its mistakes.
+  let transcriptionBlock = ''
+  if (typeof transcription === 'string' && transcription.trim()) {
+    transcriptionBlock =
+      '\n\nTRANSCRIPTION OF THIS PAGE (already recorded in Tropy; machine-produced, ' +
+      'so it may contain recognition errors — use it as the primary source for ' +
+      'textual content, and say so when the image contradicts it):\n' +
+      `"""\n${transcription.trim()}\n"""`
+  }
+
   // JSON format block is always appended — required for parseResult() to succeed.
-  let prompt = `${instructionBlock}\n\n${JSON_FORMAT_BLOCK}`
+  let prompt = `${instructionBlock}${transcriptionBlock}\n\n${JSON_FORMAT_BLOCK}`
 
   // Language instruction — appended last, after the format block, so the model
   // sees it as a final override. Keys and field names stay in English regardless.

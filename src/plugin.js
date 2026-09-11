@@ -59,6 +59,7 @@ import {
   SYNTHESIS,
   canSynthesize,
   isSynthesisFieldAccepted,
+  isSynthesisLocked,
   photoCacheKey,
   photoEntry,
   photoIndex,
@@ -424,8 +425,6 @@ class AutropyPlugin {
           'This item\'s existing metadata could not be read, so suggestions may repeat values already recorded.')
       }
 
-      const finalPrompt = buildPrompt(prompt, existingTagNames, itemMetadata, outputLanguage)
-
       run.existingTagNames = existingTagNames
       run.existingTags = existingTags
       run.suggestMetadata = suggestMetadata
@@ -436,7 +435,17 @@ class AutropyPlugin {
       // researcher's own.
       run.itemMetadata = itemMetadata
 
-      const promptDigest = digest(finalPrompt)
+      // Transcriptions are per photo, so the prompt is too — it is no longer
+      // one string for the whole run. Read up front, for every sibling, because
+      // the cost dialog below has to know each page's real cache key before it
+      // can say how many pages would actually be billed.
+      const transcriptions = await this.#readTranscriptions(run, gateway, siblings)
+
+      const promptFor = id => buildPrompt(
+        prompt, existingTagNames, itemMetadata, outputLanguage, transcriptions.get(id))
+
+      const digestFor = new Map(
+        siblings.map(id => [id, digest(promptFor(id))]))
 
       let photoIds = [photoId]
 
@@ -451,7 +460,7 @@ class AutropyPlugin {
             itemId,
             photoId: id,
             model,
-            promptDigest,
+            promptDigest: digestFor.get(id),
             imageFingerprint: imageFingerprint(this.#getState()?.photos?.[id])
           })))
 
@@ -488,8 +497,16 @@ class AutropyPlugin {
 
         try {
           await this.#analyzePhoto({
-            run, photoId: id, photo: record, model, apiKey,
-            prompt: finalPrompt, promptDigest, force, controller
+            run,
+            photoId: id,
+            photo: record,
+            model,
+            apiKey,
+            prompt: promptFor(id),
+            promptDigest: digestFor.get(id),
+            hasTranscription: transcriptions.has(id),
+            force,
+            controller
           })
         } catch (err) {
           if (controller.signal.aborted) break
@@ -564,8 +581,54 @@ class AutropyPlugin {
 
   // One photo: cache lookup, render, model call, result. Throws on failure so
   // the caller can decide whether that ends the run.
+  // Reads each photo's transcription text, if it has one.
+  //
+  // This is the gap behind "No transcription was available, so the reading below
+  // derives directly from the image" appearing on pages that were transcribed
+  // months ago: the default prompt has always told the model to prefer the
+  // transcription, and nothing had ever supplied it.
+  //
+  // A photo can carry several transcriptions; the most recent is used, which is
+  // the one Tropy's own viewer shows.
+  async #readTranscriptions (run, gateway, photoIds) {
+    const state = this.#getState()
+    const out = new Map()
+    let failed = 0
+
+    for (const id of photoIds) {
+      const ids = state?.photos?.[id]?.transcriptions
+      if (!Array.isArray(ids) || ids.length === 0) continue
+
+      try {
+        const t = await gateway.getTranscription(ids[ids.length - 1])
+        if (t?.text) out.set(id, t.text)
+      } catch (err) {
+        failed++
+        this.context.logger.warn(
+          `[AUTROPY] could not read transcription for photo ${id}: ${err.message}`)
+      }
+    }
+
+    // One notice for the lot: six failures is one problem, not six.
+    if (failed > 0) {
+      run.notices.push({
+        kind: 'info',
+        text: `${failed} transcription(s) could not be read, so those pages were ` +
+              'analyzed from the image alone.'
+      })
+    }
+
+    if (out.size > 0) {
+      this.context.logger.warn(
+        `[AUTROPY] using existing transcriptions for ${out.size}/${photoIds.length} photo(s)`)
+    }
+
+    return out
+  }
+
   async #analyzePhoto ({
-    run, photoId, photo, model, apiKey, prompt, promptDigest, force, controller
+    run, photoId, photo, model, apiKey, prompt, promptDigest,
+    hasTranscription = false, force, controller
   }) {
     const { logger } = this.context
 
@@ -607,7 +670,8 @@ class AutropyPlugin {
     logger.warn(
       `[AUTROPY] calling model: ${model} — photo ${photoId}, ` +
       `${Math.round(scan.bytes / 1024)} KB ${scan.mediaType}` +
-      `${photo.page > 0 ? `, page ${photo.page + 1}` : ''}`)
+      `${photo.page > 0 ? `, page ${photo.page + 1}` : ''}` +
+      `${hasTranscription ? ', with transcription' : ', no transcription'}`)
 
     const { result, servedModel } = await analyze({
       model,
@@ -958,7 +1022,10 @@ class AutropyPlugin {
     panel.addEventListener('keydown', blockEsper)
     panel.addEventListener('keyup', blockEsper)
 
-    const locked = isLocked(run)
+    // Each view has its own lock. The pages lock as soon as their notes are
+    // written; the item summary stays editable until its own writes settle,
+    // because it is normally asked for after the pages have been applied.
+    const locked = photoId === SYNTHESIS ? isSynthesisLocked(run) : isLocked(run)
 
     const summary = panel.querySelector('#autropy-summary')
     if (summary) {
@@ -1217,13 +1284,13 @@ class AutropyPlugin {
   // The ledger entry is the part that matters: it is written the moment the
   // outcome is known, so a run that dies between two writes still knows which
   // of them landed.
-  #recordOutcome (run, { key, kind, outcome }) {
+  #recordOutcome (run, { key, kind, outcome, wrote }) {
     if (!outcome) return
 
     const { status, describe, detail, targetChanged, noteId } = outcome
 
     if (status === ACKNOWLEDGED) {
-      recordOperation(run, { key, kind, status: OP_ACKNOWLEDGED, describe, noteId })
+      recordOperation(run, { key, kind, status: OP_ACKNOWLEDGED, describe, noteId, wrote })
       run.notices.push({ kind: 'ok', text: `Done: ${describe}.` })
 
       if (targetChanged) {
@@ -1342,12 +1409,12 @@ class AutropyPlugin {
 
     if (Object.keys(fields).length > 0) {
       const key = metadataOp(itemId)
-      recordOperation(run, { key, kind: 'metadata', status: OP_PENDING })
+      recordOperation(run, { key, kind: 'metadata', status: OP_PENDING, wrote: fields })
 
       const outcome = await gateway.saveMetadata(itemId, fields)
 
       if (outcome) {
-        this.#recordOutcome(run, { key, kind: 'metadata', outcome })
+        this.#recordOutcome(run, { key, kind: 'metadata', outcome, wrote: fields })
       } else {
         // saveMetadata returns null when every accepted field was dropped as
         // unwritable. That used to pass through #recordOutcome's null guard and

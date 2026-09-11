@@ -21,6 +21,19 @@ From the review panel you can:
 
 Nothing is written to your project until you press **Apply accepted**.
 
+### Transcriptions
+
+If a photo already has a transcription in Tropy, Autropy sends it with the image and tells the model
+to use it as the primary source for the text, saying so where the image contradicts it. The most
+recent transcription is used, and it is labelled as machine-produced so the model treats recognition
+errors as errors rather than as the document.
+
+Only the plain text is sent — never the ALTO XML, which is tens of kilobytes of coordinates per page
+and would be billed as input tokens for nothing.
+
+Adding or changing a transcription invalidates that page's cached analysis, so re-running picks it
+up. The log says `with transcription` or `no transcription` per page.
+
 ### Multi-page items
 
 When an item has more than one photo, Autropy asks before it spends anything:

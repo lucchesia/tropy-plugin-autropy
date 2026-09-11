@@ -365,6 +365,19 @@ export class RestProjectGateway {
     return flattenMetadata(raw)
   }
 
+  // The plain text of one transcription.
+  //
+  // Only `text` is read. The response also carries `data` — the full ALTO XML,
+  // which for a dense page is tens of kilobytes of coordinates and would be
+  // billed as input tokens for no analytical gain.
+  async getTranscription (id) {
+    const raw = await this.#read(
+      `/transcriptions/${id}`, `reading transcription ${id}`)
+
+    const text = typeof raw?.text === 'string' ? raw.text.trim() : ''
+    return text ? { id, text } : null
+  }
+
   // ── writes ───────────────────────────────────────────────────────────────
 
   // Tags are addressed by numeric id: name-based application returns 500.
