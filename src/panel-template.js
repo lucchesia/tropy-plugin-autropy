@@ -51,10 +51,16 @@ function renderChip (tagName, isExisting) {
 // All rows use data-field matching the DC_WRITE_URIS keys in dc.js so that
 // #applyAccepted() can write accepted rows without any additional wiring.
 function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
+  // The value text sits in an inner block so its height can be capped without
+  // taking the <td> out of table layout — see .autropy-meta-row__text.
+  const valueCell = value =>
+    `<td class="autropy-meta-row__value">` +
+    `<span class="autropy-meta-row__text">${escapeHtml(value)}</span></td>`
+
   const typeRow = `
       <tr class="autropy-meta-row" data-field="type" data-accepted="false">
         <td class="autropy-meta-row__field">type</td>
-        <td class="autropy-meta-row__value">${escapeHtml(docType || 'unknown')}</td>
+        ${valueCell(docType || 'unknown')}
         <td class="autropy-meta-row__action">
           <button class="autropy-meta-row__accept">Accept</button>
         </td>
@@ -67,7 +73,7 @@ function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
       .map(([field, value]) => `
       <tr class="autropy-meta-row" data-field="${escapeAttr(field)}" data-accepted="false">
         <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
-        <td class="autropy-meta-row__value">${escapeHtml(String(value))}</td>
+        ${valueCell(String(value))}
         <td class="autropy-meta-row__action">
           <button class="autropy-meta-row__accept">Accept</button>
         </td>
@@ -78,6 +84,11 @@ function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
   return `
     <section class="autropy-section">
       <table class="autropy-meta-table">
+        <colgroup>
+          <col class="autropy-meta-col--field">
+          <col>
+          <col class="autropy-meta-col--action">
+        </colgroup>
         <thead>
           <tr>
             <th>Field</th>
@@ -106,7 +117,10 @@ function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
 // CONFIRMED from DevTools: border color rgb(210,210,210)
 // UNVERIFIED: muted text rgb(128,128,128) — reasonable midpoint, not inspected
 // UNVERIFIED: accent blue #5b8dd9 — chosen to harmonize; replace after visual check
-const PANEL_STYLES = `
+//
+// NOTE: this is a template literal, so no backticks anywhere inside it — not
+// even in a CSS comment. One ends the literal early and breaks the module.
+export const PANEL_STYLES = `
 <style id="autropy-styles">
   #autropy-panel {
     /* CONFIRMED (dom_injection_test_results.md): absolute overlay at bottom of .esper-container */
@@ -115,7 +129,14 @@ const PANEL_STYLES = `
     left: 0;
     right: 0;
     max-height: 60%;   /* prevents panel from eclipsing the image */
-    overflow-y: auto;
+    max-width: 100%;
+    /* Clip horizontally, never spill. Without this, one long AI-written
+     * metadata value widened the panel's content box, overflowed the image
+     * viewer, and gave the whole Tropy window a horizontal scrollbar — which
+     * pushed the project panel off the left edge of the screen and made it
+     * look as though Tropy itself had broken. Contain our own mess. */
+    overflow: hidden auto;
+    overscroll-behavior: contain;
     z-index: 50;       /* above canvas; below Tropy modal dialogs */
     display: flex;
     flex-direction: column;
@@ -223,6 +244,10 @@ const PANEL_STYLES = `
 
   .autropy-meta-table {
     width: 100%;
+    /* 'fixed' is essential, not cosmetic: with the default 'auto', the long
+     * description cell's intrinsic width wins over 'width: 100%' and the table
+     * grows past the panel. Column widths come from the colgroup. */
+    table-layout: fixed;
     border-collapse: collapse;
     font-size: 11px;
   }
@@ -235,14 +260,32 @@ const PANEL_STYLES = `
     border-bottom: 1px solid rgb(210,210,210); /* CONFIRMED from DevTools */
   }
 
+  /* With table-layout: fixed the column widths come from here, so the middle
+   * column absorbs whatever is left and nothing can push the table wider. */
+  .autropy-meta-col--field { width: 76px; }
+  .autropy-meta-col--action { width: 78px; }
+
   .autropy-meta-row__field {
     color: rgb(128,128,128); /* UNVERIFIED: muted text */
     padding: 3px 4px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .autropy-meta-row__value {
     padding: 3px 8px;
+    overflow-wrap: anywhere;
+  }
+
+  /* A model-written description runs to many lines and would otherwise crowd
+   * out every other row. Capped here on an inner block — not on the <td>,
+   * because 'display: block' on a cell removes it from table layout and
+   * defeats 'table-layout: fixed'. */
+  .autropy-meta-row__text {
+    display: block;
+    max-height: 4.6em;
+    overflow-y: auto;
   }
 
   .autropy-meta-row[data-accepted="true"] .autropy-meta-row__value {
@@ -261,19 +304,10 @@ const PANEL_STYLES = `
   }
 
   /* Sticky so Dismiss and Apply are reachable no matter how long the summary
-   * and metadata are. The panel is the scroll container (max-height + overflow
-   * -y: auto), and a long AI description pushed these buttons out of view with
-   * no way back — keyboard events are deliberately swallowed inside the panel,
-   * so there was no way to close it at all. */
-  /* A model-written description runs to several lines and would otherwise crowd
-   * out every other row. Cap it and let it scroll in place. */
-  .autropy-meta-row__value {
-    display: block;
-    max-height: 4.6em;
-    overflow-y: auto;
-    overflow-wrap: anywhere;
-  }
-
+   * and metadata are. The panel is the scroll container (max-height +
+   * overflow-y: auto), and a long AI description pushed these buttons out of
+   * view with no way back — keyboard events are deliberately swallowed inside
+   * the panel, so there was no way to close it at all. */
   .autropy-actions {
     position: sticky;
     bottom: 0;

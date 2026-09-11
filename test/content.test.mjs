@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { escapeAttr, escapeHtml, textToParagraphs } from '../src/html.js'
 import { normalizeTags, validateResult } from '../src/result-schema.js'
 import { flattenMetadata, toMetadataPayload } from '../src/dc.js'
-import { renderStatusLines } from '../src/panel-template.js'
+import { PANEL_STYLES, buildPanelHTML, renderStatusLines } from '../src/panel-template.js'
 
 // ── escaping ───────────────────────────────────────────────────────────────
 
@@ -186,4 +186,70 @@ test('renderStatusLines is empty when there is nothing to report', () => {
 test('an unknown outcome gets its own visual treatment', () => {
   const html = renderStatusLines([{ kind: 'unknown', text: 'may not have saved' }])
   assert.match(html, /autropy-status__line--unknown/)
+})
+
+// ── containment ────────────────────────────────────────────────────────────
+//
+// These assert structure rather than appearance, because the failure they guard
+// against was not cosmetic: a long AI-written description widened the panel,
+// overflowed Tropy's image viewer, and gave the whole window a horizontal
+// scrollbar — pushing the project panel off the left of the screen so it looked
+// as though Tropy had broken. It recurred once after a partial fix.
+
+const LONG_DESCRIPTION =
+  'Death registry entry (No. 58694) from a Brazilian civil registry office ' +
+  'recording the death of Carlos (Karl) Chieger, aged 63, born in Austria, ' +
+  'resident at Rua do Catete 156, Rio de Janeiro, who died on 11 July 1960 ' +
+  'of arterial rupture, son of Bernat Theodor Chieger and Rosa Chieger.'
+
+function panel () {
+  return buildPanelHTML({
+    summary: 'A death record.',
+    document_type: 'administrative_document',
+    possible_tags: ['Chieger Karl', 'Catalogados'],
+    metadata_suggestions: { title: 'Óbito — Carlos Chieger', description: LONG_DESCRIPTION },
+    confidence: 0.9
+  }, ['Chieger Karl'], true)
+}
+
+test('the panel clips horizontally instead of spilling into Tropy', () => {
+  assert.match(PANEL_STYLES, /#autropy-panel\s*\{[^}]*overflow:\s*hidden auto/,
+    'the panel must clip on the x axis, or its content widens the host window')
+  assert.match(PANEL_STYLES, /#autropy-panel\s*\{[^}]*max-width:\s*100%/)
+})
+
+test('the metadata table cannot grow past the panel', () => {
+  // `width: 100%` alone loses to a long cell's intrinsic width under the
+  // default `table-layout: auto`.
+  assert.match(PANEL_STYLES, /\.autropy-meta-table\s*\{[^}]*table-layout:\s*fixed/)
+  assert.match(PANEL_STYLES, /\.autropy-meta-col--field\s*\{[^}]*width:/)
+  assert.match(PANEL_STYLES, /\.autropy-meta-col--action\s*\{[^}]*width:/)
+})
+
+test('the table declares a colgroup so fixed layout has widths to use', () => {
+  const html = panel()
+
+  assert.match(html, /<colgroup>/)
+  assert.match(html, /autropy-meta-col--field/)
+  assert.match(html, /autropy-meta-col--action/)
+})
+
+test('a long value is capped on an inner block, not on the cell', () => {
+  // `display: block` on a <td> takes it out of table layout and defeats
+  // table-layout: fixed — which is how this bug came back.
+  const html = panel()
+
+  assert.match(html, /<td class="autropy-meta-row__value"><span class="autropy-meta-row__text">/)
+  assert.doesNotMatch(PANEL_STYLES, /\.autropy-meta-row__value\s*\{[^}]*display:\s*block/)
+  assert.match(PANEL_STYLES, /\.autropy-meta-row__text\s*\{[^}]*max-height:/)
+})
+
+test('the value text survives wrapping, so Apply still reads it', () => {
+  // #applyAccepted reads .autropy-meta-row__value textContent.
+  const html = panel()
+  assert.ok(html.includes(LONG_DESCRIPTION), 'the description must still be present as text')
+})
+
+test('the action row is sticky so Dismiss stays reachable', () => {
+  assert.match(PANEL_STYLES, /\.autropy-actions\s*\{[^}]*position:\s*sticky/)
 })
