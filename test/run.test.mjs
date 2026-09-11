@@ -354,6 +354,48 @@ test('the banner counts what actually landed', () => {
   assert.equal(applied.model, 'claude-sonnet-5')
 })
 
+// ── overwriting an existing value ──────────────────────────────────────────
+
+test('a suggestion that would replace an existing value says so', () => {
+  // Tropy keeps one value per property, so accepting such a row is a
+  // replacement. Anita applied the type row on an item whose "Tipo de Imagem"
+  // read "Desenho" and it became the model's English "drawing", with nothing
+  // in the panel having said that would happen.
+  const r = run()
+  r.itemMetadata = { type: 'Desenho', title: '' }
+
+  const html = buildPanelHTML({
+    run: r, photoId: 819, existingTagNames: [], suggestMetadata: true
+  })
+
+  assert.match(html, /replaces: Desenho/)
+  assert.doesNotMatch(html, /replaces: <\/span>/, 'an empty field is not a replacement')
+})
+
+test('an identical value is not reported as a replacement', () => {
+  const r = run()
+  r.itemMetadata = { type: 'administrative_document' }
+
+  const html = buildPanelHTML({
+    run: r, photoId: 819, existingTagNames: [], suggestMetadata: true
+  })
+
+  assert.doesNotMatch(html, /replaces:/)
+})
+
+test('Suggest Metadata off means no metadata row can be written', () => {
+  // The type row used to render unconditionally, so with the setting off,
+  // accepting it still wrote dc:type.
+  const r = run()
+
+  const html = buildPanelHTML({
+    run: r, photoId: 819, existingTagNames: [], suggestMetadata: false
+  }).split('</style>')[1]
+
+  assert.doesNotMatch(html, /autropy-meta-row/)
+  assert.match(html, /autropy-header__type/, 'the inferred type is still shown in the header')
+})
+
 // ── source assertions ──────────────────────────────────────────────────────
 
 test('the note stamps the model that ran, not the current preference', () => {

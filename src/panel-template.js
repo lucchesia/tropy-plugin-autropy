@@ -71,9 +71,22 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
   const docType = result.document_type || 'unknown'
   const metadataSuggestions = result.metadata_suggestions
   const locked = isLocked(run)
+  const current = run.itemMetadata || {}
 
-  const valueCell = value =>
-    `<td class="autropy-meta-row__value">${escapeHtml(value)}</td>`
+  // Accepting a suggestion for a field that already holds something REPLACES it,
+  // and Tropy keeps one value per property. That has to be visible before the
+  // click, not discovered afterwards: the model answers in an English vocabulary
+  // ("drawing") and will happily overwrite a curated Portuguese one ("Desenho"),
+  // with nothing left to say which was the researcher's.
+  const valueCell = (field, value) => {
+    const existing = current[field]
+    const replaces = (existing != null && String(existing).trim() &&
+      String(existing).trim() !== String(value).trim())
+      ? `<span class="autropy-meta-row__replaces">replaces: ${escapeHtml(existing)}</span>`
+      : ''
+
+    return `<td class="autropy-meta-row__value">${escapeHtml(value)}${replaces}</td>`
+  }
 
   // When the run is locked there is nothing to accept, so the button is replaced
   // by a word saying what happened to that field rather than a control that
@@ -92,11 +105,17 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
       <tr class="autropy-meta-row" data-field="${escapeAttr(field)}" data-accepted="${
   accepted ? 'true' : 'false'}">
         <td class="autropy-meta-row__field">${escapeHtml(field)}</td>
-        ${valueCell(value)}
+        ${valueCell(field, value)}
         ${actionCell(field, accepted)}
       </tr>`
 
-  const typeRow = row('type', docType, isFieldAccepted(run, photoId, 'type'))
+  // The type row used to render unconditionally, which meant "Suggest Metadata"
+  // did not in fact gate every metadata write: with it off, accepting this row
+  // still wrote dc:type. The inferred type is still shown — it is the panel's
+  // header — but offering to write it is a metadata suggestion like any other.
+  const typeRow = suggestMetadata
+    ? row('type', docType, isFieldAccepted(run, photoId, 'type'))
+    : ''
 
   let extraRows = ''
   if (suggestMetadata && metadataSuggestions && typeof metadataSuggestions === 'object') {
@@ -106,6 +125,8 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
         row(field, String(value), isFieldAccepted(run, photoId, field)))
       .join('')
   }
+
+  if (!typeRow && !extraRows) return ''
 
   return `
     <section class="autropy-section">
@@ -358,6 +379,16 @@ export const PANEL_STYLES = `
    * Accept struck the value out — which looks exactly like rejecting it. On a
    * panel where the chips use dimming to mean rejected, the same visual meant
    * the opposite thing one section lower. */
+  /* Shown under a suggestion that would overwrite an existing value. Tropy keeps
+   * one value per property, so accepting such a row is a replacement, and the
+   * old value is not recoverable from the panel afterwards. */
+  .autropy-meta-row__replaces {
+    display: block;
+    margin-top: 2px;
+    font-size: 10px;
+    color: #b8642a;
+  }
+
   .autropy-meta-row[data-accepted="true"] .autropy-meta-row__value {
     font-weight: 500;
     box-shadow: inset 2px 0 0 #5b8dd9;
@@ -543,6 +574,10 @@ export const PANEL_STYLES = `
 
     .autropy-meta-row__outcome {
       color: rgb(120,120,120);
+    }
+
+    .autropy-meta-row__replaces {
+      color: #e0a06a;
     }
 
     .autropy-status__line--ok .autropy-status__mark { color: #7cc98a; }

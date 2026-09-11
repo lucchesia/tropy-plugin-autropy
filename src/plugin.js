@@ -366,6 +366,12 @@ class AutropyPlugin {
       run.existingTags = existingTags
       run.suggestMetadata = suggestMetadata
 
+      // Kept so the panel can show which suggestions would REPLACE something.
+      // Tropy holds one value per property, so an accepted suggestion for a
+      // filled field overwrites it with nothing left to say which value was the
+      // researcher's own.
+      run.itemMetadata = itemMetadata
+
       // The cache key covers the assembled prompt, so it already reflects the
       // tag vocabulary and the item's current metadata: fill a field or add a
       // tag and the next run is a miss, as it should be. `force` skips the
