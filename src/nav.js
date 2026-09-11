@@ -1,0 +1,42 @@
+// nav.js — Tropy's view mode, and the action that changes it.
+//
+// Small on purpose: the action shape below is copied from Tropy's own bundle,
+// and a wrong shape would dispatch silently and do nothing. Keeping it here
+// makes it assertable in a test without a DOM.
+//
+// VERIFIED against Tropy Beta 1.18.0-beta.5 (app.asar):
+//
+//   MODE = { PROJECT: 'project', ITEM: 'item' }
+//   const update = createAction(NAV.UPDATE)          // NAV.UPDATE = 'nav.update'
+//   const mode = {
+//     item ()    { return update({ mode: NAV.MODE.ITEM }) },
+//     project () { return update({ mode: NAV.MODE.PROJECT }) }
+//   }
+//
+// and reduced as a plain merge, so dispatching it is synchronous and runs no
+// command:
+//
+//   case NAV.UPDATE: return { ...state, ...payload }
+
+export const ITEM_MODE = 'item'
+export const PROJECT_MODE = 'project'
+
+// The action Tropy itself dispatches to open the item view.
+export function itemModeAction () {
+  return { type: 'nav.update', payload: { mode: ITEM_MODE } }
+}
+
+export function navMode (state) {
+  return state?.nav?.mode ?? null
+}
+
+// Deliberately narrow: only a mode Tropy has positively reported as 'project'
+// counts. An unreadable state is not "probably project mode" — guessing wrong
+// would refuse to show a result that was already paid for.
+export function isProjectMode (state) {
+  return navMode(state) === PROJECT_MODE
+}
+
+export function isItemMode (state) {
+  return navMode(state) === ITEM_MODE
+}

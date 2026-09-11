@@ -22,6 +22,7 @@ import { readFile } from 'node:fs/promises'
 // while the repo said alpha.2), which corrupts note provenance.
 import { version as AUTROPY_VERSION } from '../package.json'
 import { analyzeImage } from './api.js'
+import { isItemMode, isProjectMode, itemModeAction } from './nav.js'
 import {
   ACKNOWLEDGED,
   ProjectIdentityError,
@@ -51,9 +52,30 @@ class AutropyPlugin {
   constructor (options, context) {
     this.options = Object.assign({}, AutropyPlugin.defaults, options)
     this.context = context
+
+    // `load()` is not a Tropy hook. Tropy's plugin manager does exactly two
+    // things with a plugin: `new Plugin(options, context)`, then
+    // `instances[id][action](...)` for a menu action (export/import/extract/
+    // transcribe). Verified in Tropy Beta 1.18.0-beta.5:
+    //
+    //   this.instances[i] = new Plugin(options ?? {}, this.getContext(plugin))
+    //   exec = async ({ id, action }, ...args) => this.instances[id][action](...args)
+    //
+    // So load() had never run in any released build. That is why the version
+    // line was missing from the log, why the preflight never reported, and why
+    // the toolbar icon only appeared *after* File > Export > Autropy had been
+    // used once — the export hook injects it as a side effect.
+    //
+    // Not awaited: a constructor cannot await, and a throw here makes Tropy
+    // drop the plugin with only "failed to create plugin" in the log.
+    this.load().catch(err => {
+      context?.logger?.error?.(
+        { stack: err?.stack }, `[AUTROPY] load failed: ${err?.message}`)
+    })
   }
 
   #state = { itemId: null, photoId: null, result: null, existingTags: [] }
+  #loaded = false
   #panelInjected = false
   #toolbarInjected = false
   #domObserver = null
@@ -102,6 +124,53 @@ class AutropyPlugin {
     const photo = photoId ? state?.photos?.[photoId] : null
     const itemId = photo?.item ?? state?.nav?.items?.[0] ?? null
     return { itemId, photoId: photoId ?? null, photo }
+  }
+
+  // In project mode Tropy parks the entire item view off-screen to the right —
+  // `.item-view` carries `transform: translate3d(calc(100% - <panel>px), 0, 0)`
+  // — and `.esper-container`, where the panel lives, goes with it. Injecting
+  // there while in project mode builds a panel nobody can see, and then
+  // focusing it drags the whole Tropy window sideways (see #unscrollAncestors).
+  //
+  // So switch to item mode first, using the same plain action Tropy dispatches
+  // when an item is opened: `nav.update` is reduced as `{ ...state, ...payload }`,
+  // so it is synchronous and carries no command or side effect.
+  //
+  // Returns false only when the mode is known to be 'project' and there is no
+  // store to change it with. An unknown mode proceeds as before rather than
+  // blocking on a state read that may not be available.
+  #enterItemMode () {
+    if (!isProjectMode(this.#getState())) return true
+
+    const store = this.#store()
+    if (!store || typeof store.dispatch !== 'function') return false
+
+    store.dispatch(itemModeAction())
+    this.context.logger.warn('[AUTROPY] switched Tropy to item mode to show the panel')
+
+    return isItemMode(this.#getState())
+  }
+
+  // Repairs the one way Autropy can move Tropy's whole window.
+  //
+  // Tropy's layout overflows horizontally by design — in project mode the item
+  // view is translated a full width to the right — and the ancestors that hide
+  // the overflow use `overflow: hidden`. That stops the *user* scrolling; it
+  // does not stop the browser scrolling programmatically to reveal a focused
+  // element. So focusing the summary set scrollLeft on one of those ancestors
+  // and shifted the entire app left, with no scrollbar to drag back: project
+  // sidebar off the left edge, item panel stranded mid-screen, panels no longer
+  // resizable, and no recovery short of restarting Tropy. It read as Tropy
+  // breaking, which is why it took three attempts to find.
+  //
+  // `focus({ preventScroll: true })` prevents our own case; this puts back
+  // anything else that scrolls the chain. Horizontal axis only, and only when
+  // non-zero: nothing in this ancestor chain scrolls horizontally in normal use
+  // (the item table's scroll container is in a different subtree).
+  #unscrollAncestors (el) {
+    for (let node = el; node; node = node.parentElement) {
+      if (node.scrollLeft) node.scrollLeft = 0
+    }
   }
 
   #gatewayFor (projectPath, port) {
@@ -267,8 +336,14 @@ class AutropyPlugin {
 
   #showResult (entry, itemId, photoId) {
     // #injectPanel clears #state via #removePanel, so #state is set afterwards;
-    // the Apply handler and the nav watcher both read it.
-    this.#injectPanel(entry.result, entry.existingTagNames, entry.suggestMetadata)
+    // the Apply handler and the nav watcher both read it. When it refuses
+    // there is nothing to hold state for — it has already reported why — and
+    // subscribing to navigation without a panel would only schedule a
+    // #removePanel for a panel that does not exist.
+    if (!this.#injectPanel(entry.result, entry.existingTagNames, entry.suggestMetadata)) {
+      return
+    }
+
     this.#state = {
       itemId,
       photoId,
@@ -346,6 +421,19 @@ class AutropyPlugin {
   #injectPanel (result, existingTagNames, suggestMetadata) {
     this.#removePanel()
 
+    // The analysis is already cached by this point, so refusing here costs
+    // nothing: clicking the icon in the item view replays it without a second
+    // billed request.
+    if (!this.#enterItemMode()) {
+      this.#fatal(
+        'Autropy needs the item view',
+        'The analysis is ready, but Tropy is in project view — the panel would ' +
+        'open off-screen. Double-click the item to open it in the item view, ' +
+        'then click the Autropy icon in the image toolbar. The analysis is kept, ' +
+        'so this will not run again.')
+      return false
+    }
+
     const container = document.querySelector('.esper-container')
     if (!container) {
       // Cannot be reported in the panel — the panel needs this container.
@@ -353,7 +441,7 @@ class AutropyPlugin {
         'Autropy could not open its panel',
         'The Tropy image viewer was not found on screen. Open a photo in the ' +
         'item view and try again.')
-      return
+      return false
     }
 
     // The panel is an absolute overlay, so the container has to be a positioned
@@ -373,11 +461,18 @@ class AutropyPlugin {
       document.head.appendChild(wrapper.querySelector('style'))
     }
 
-    container.appendChild(wrapper.querySelector('#autropy-panel'))
+    const panel = wrapper.querySelector('#autropy-panel')
+    container.appendChild(panel)
     this.#panelInjected = true
 
     this.#wirePanelEvents()
+
+    // After wiring, because wiring focuses the summary.
+    this.#unscrollAncestors(panel)
+
     this.context.logger.warn('[AUTROPY] review panel injected into .esper-container')
+
+    return true
   }
 
   #wirePanelEvents () {
@@ -405,7 +500,13 @@ class AutropyPlugin {
       summary.addEventListener('keyup', blockEsper)
       // Without focus here, focus stays on section.esper and all keys are
       // treated as image shortcuts.
-      summary.focus()
+      //
+      // `preventScroll` is load-bearing. A plain focus() asks the browser to
+      // reveal the element, which scrolls every ancestor that can be scrolled —
+      // including ones with `overflow: hidden`, which then offer the user no
+      // scrollbar to undo it. That is what shifted Tropy's whole window
+      // sideways; see #unscrollAncestors.
+      summary.focus({ preventScroll: true })
     }
 
     document.querySelectorAll('.autropy-chip').forEach(chip => {
@@ -697,6 +798,11 @@ class AutropyPlugin {
   // ── lifecycle ────────────────────────────────────────────────────────────
 
   async load () {
+    // Called from the constructor, since Tropy has no load hook. Guarded in
+    // case a future Tropy grows one and calls it too.
+    if (this.#loaded) return
+    this.#loaded = true
+
     // First line in the log, unconditionally, before anything can fail.
     //
     // This exists because of a real debugging dead end: a stale build stayed
@@ -706,6 +812,13 @@ class AutropyPlugin {
     this.context.logger.warn(
       `[AUTROPY] v${AUTROPY_VERSION} loaded — port ${resolvePort(this.options.port)}, ` +
       `model "${this.options.model || '(not set)'}"`)
+
+    // Plugins are constructed during project.init, so the body may not be
+    // parsed yet. Nothing below can touch the DOM until it is.
+    if (!document.body) {
+      await new Promise(resolve =>
+        document.addEventListener('DOMContentLoaded', resolve, { once: true }))
+    }
 
     // load() runs before Tropy renders the toolbar, and the esper tool group
     // only exists once an item with a photo is selected — which may be much
