@@ -33,14 +33,36 @@ test('an existing transcription reaches the model', () => {
   assert.match(prompt, /Reference: 0000\/00/)
 })
 
-test('the transcription is labelled machine-produced', () => {
+test('a job-produced transcription is described as one', () => {
   // It is OCR or HTR output. A model told to treat it as authoritative will
   // repeat its recognition errors with confidence.
+  const prompt = buildPrompt('', [], null, '', {
+    text: TRANSCRIPTION, source: 'job'
+  })
+
+  assert.match(prompt, /produced by a text-recognition job/)
+  assert.match(prompt, /recognition errors/)
+  assert.match(prompt, /say where the image contradicts it/)
+})
+
+test('a transcription of unrecorded origin is NOT called machine output', () => {
+  // The claim in the prompt is a provenance claim. Telling the model that a
+  // researcher's own transcription is OCR output invites it to second-guess
+  // careful work — the same error, pointed the other way, as attributing a
+  // machine value to the researcher.
+  const prompt = buildPrompt('', [], null, '', {
+    text: TRANSCRIPTION, source: 'unknown'
+  })
+
+  assert.match(prompt, /its origin is not recorded/)
+  assert.match(prompt, /do not assume it is machine output/)
+  assert.doesNotMatch(prompt, /recognition errors/)
+})
+
+test('a bare string is treated as origin-unrecorded, because it is', () => {
   const prompt = buildPrompt('', [], null, '', TRANSCRIPTION)
 
-  assert.match(prompt, /machine-produced/)
-  assert.match(prompt, /recognition errors/)
-  assert.match(prompt, /say so when the image contradicts it/)
+  assert.match(prompt, /its origin is not recorded/)
 })
 
 test('no transcription means no block at all', () => {
@@ -107,18 +129,39 @@ test('only the text is read, never the ALTO payload', async () => {
   const g = gateway(ok({
     id: 837,
     parent: 462,
+    status: 1,
     text: TRANSCRIPTION,
     data: '<?xml version="1.0"?><alto>' + 'x'.repeat(50000) + '</alto>'
   }))
 
   const t = await g.getTranscription(837)
 
-  assert.deepEqual(Object.keys(t).sort(), ['id', 'text'])
+  assert.deepEqual(Object.keys(t).sort(), ['id', 'source', 'text'])
   assert.equal(t.text, TRANSCRIPTION)
 })
 
+test('ALTO data or a job id means a recognition engine produced it', async () => {
+  const withAlto = gateway(ok({ id: 1, status: 1, text: 'x', data: '<alto/>' }))
+  const withJob = gateway(ok({
+    id: 2, status: 1, text: 'x', config: { jobId: 'abc' }
+  }))
+  const neither = gateway(ok({ id: 3, status: 1, text: 'x' }))
+
+  assert.equal((await withAlto.getTranscription(1)).source, 'job')
+  assert.equal((await withJob.getTranscription(2)).source, 'job')
+  assert.equal((await neither.getTranscription(3)).source, 'unknown')
+})
+
+test('a job that has not completed is not sent at all', async () => {
+  // Tropy's own exporter drops status < 1, and partial recognition output is
+  // worse than none.
+  const g = gateway(ok({ id: 1, status: 0, text: 'partial', data: '<alto/>' }))
+
+  assert.equal(await g.getTranscription(1), null)
+})
+
 test('an empty transcription is nothing, not an empty block', async () => {
-  const g = gateway(ok({ id: 1, text: '   ', data: '<alto/>' }))
+  const g = gateway(ok({ id: 1, status: 1, text: '   ', data: '<alto/>' }))
 
   assert.equal(await g.getTranscription(1), null)
 })

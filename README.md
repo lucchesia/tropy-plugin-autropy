@@ -24,9 +24,18 @@ Nothing is written to your project until you press **Apply accepted**.
 ### Transcriptions
 
 If a photo already has a transcription in Tropy, Autropy sends it with the image and tells the model
-to use it as the primary source for the text, saying so where the image contradicts it. The most
-recent transcription is used, and it is labelled as machine-produced so the model treats recognition
-errors as errors rather than as the document.
+to use it as the primary source for the text, saying where the image contradicts it. The most recent
+completed transcription is used; a recognition job that has not finished is skipped.
+
+**How the transcription is described is itself a provenance claim**, so Autropy says only what Tropy
+records. A transcription carrying ALTO data or a job id came from a text-recognition engine, and is
+described as one — *"may contain recognition errors"*. Anything else reached Tropy another way and
+Tropy stores nothing about whose text it is, so it is described as *"origin is not recorded; do not
+assume it is machine output"*.
+
+That distinction matters in both directions. Calling a researcher's own transcription machine output
+invites the model to second-guess careful work — the same error as attributing a machine's value to
+the researcher, pointed the other way.
 
 Only the plain text is sent — never the ALTO XML, which is tens of kilobytes of coordinates per page
 and would be billed as input tokens for nothing.

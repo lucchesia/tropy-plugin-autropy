@@ -601,7 +601,7 @@ class AutropyPlugin {
 
       try {
         const t = await gateway.getTranscription(ids[ids.length - 1])
-        if (t?.text) out.set(id, t.text)
+        if (t?.text) out.set(id, t)
       } catch (err) {
         failed++
         this.context.logger.warn(

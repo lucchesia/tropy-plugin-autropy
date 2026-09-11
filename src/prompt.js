@@ -69,6 +69,24 @@ export const DEFAULT_PROMPT = `${ANALYSIS_INSTRUCTIONS}\n\n${JSON_FORMAT_BLOCK}`
 //   primary source for textual content", and for months nothing supplied one —
 //   so every analysis of a transcribed page opened by announcing that no
 //   transcription was available and read the handwriting from the image instead.
+// Accepts either { text, source } from the gateway, or a bare string — in which
+// case the origin is treated as unrecorded, because it is.
+function normalizeTranscription (transcription) {
+  if (!transcription) return null
+
+  const text = typeof transcription === 'string'
+    ? transcription.trim()
+    : String(transcription.text ?? '').trim()
+
+  if (!text) return null
+
+  const source = (typeof transcription === 'object' && transcription.source === 'job')
+    ? 'job'
+    : 'unknown'
+
+  return { text, source }
+}
+
 export function buildPrompt (
   userPrompt, existingTags, itemMetadata, outputLanguage, transcription = null
 ) {
@@ -107,17 +125,28 @@ export function buildPrompt (
     }
   }
 
-  // The transcription goes in before the format block, on both paths. Labelled
-  // as machine-produced and possibly imperfect, because it usually is — it is
-  // OCR or HTR output, and a model told to treat it as authoritative will
-  // confidently repeat its mistakes.
+  // The transcription goes in before the format block, on both paths.
+  //
+  // How it is described is a provenance claim, so it says only what Tropy
+  // actually records. A transcription with ALTO data or a job id came from a
+  // recognition engine and may contain recognition errors. Anything else
+  // arrived some other way and Tropy records nothing about whose text it is —
+  // calling that "machine-produced" would tell the model that a researcher's
+  // own careful transcription is OCR output to be second-guessed.
+  const t = normalizeTranscription(transcription)
+
   let transcriptionBlock = ''
-  if (typeof transcription === 'string' && transcription.trim()) {
+  if (t) {
+    const origin = t.source === 'job'
+      ? 'produced by a text-recognition job in Tropy, so it may contain ' +
+        'recognition errors'
+      : 'recorded in Tropy alongside this image; its origin is not recorded, so ' +
+        'do not assume it is machine output'
+
     transcriptionBlock =
-      '\n\nTRANSCRIPTION OF THIS PAGE (already recorded in Tropy; machine-produced, ' +
-      'so it may contain recognition errors — use it as the primary source for ' +
-      'textual content, and say so when the image contradicts it):\n' +
-      `"""\n${transcription.trim()}\n"""`
+      `\n\nTRANSCRIPTION OF THIS PAGE (${origin} — use it as the primary source ` +
+      'for textual content, and say where the image contradicts it):\n' +
+      `"""\n${t.text}\n"""`
   }
 
   // JSON format block is always appended — required for parseResult() to succeed.

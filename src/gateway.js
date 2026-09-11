@@ -365,17 +365,34 @@ export class RestProjectGateway {
     return flattenMetadata(raw)
   }
 
-  // The plain text of one transcription.
+  // The plain text of one transcription, and what Tropy records about where it
+  // came from.
   //
   // Only `text` is read. The response also carries `data` — the full ALTO XML,
   // which for a dense page is tens of kilobytes of coordinates and would be
   // billed as input tokens for no analytical gain.
+  //
+  // `source` is the only honest claim available. Verified in Tropy Beta
+  // 1.18.0-beta.5: `updateTranscription` sets `status = 1` and fills `text` and
+  // `data` from a completed job's output, and `config` carries that job's id.
+  // So ALTO data or a jobId means a transcription engine produced it. Anything
+  // else arrived another way — `POST /transcriptions` accepts arbitrary text —
+  // and Tropy records nothing about whose text it is.
+  //
+  // `status < 1` is a job that has not completed. Tropy's own exporter drops
+  // those, and so does this.
   async getTranscription (id) {
     const raw = await this.#read(
       `/transcriptions/${id}`, `reading transcription ${id}`)
 
     const text = typeof raw?.text === 'string' ? raw.text.trim() : ''
-    return text ? { id, text } : null
+    if (!text) return null
+
+    if (typeof raw.status === 'number' && raw.status < 1) return null
+
+    const source = (raw.config?.jobId || raw.data) ? 'job' : 'unknown'
+
+    return { id, text, source }
   }
 
   // ── writes ───────────────────────────────────────────────────────────────
