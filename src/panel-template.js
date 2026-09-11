@@ -13,7 +13,9 @@
 // CONFIRMED (dom_injection_test_results.md): autropy- prefix is clean (0 matches on fresh load).
 //
 // CONFIRMED (dom_injection_test_results.md): panel uses position:absolute; bottom:0 overlay
-//   inside .esper-container. max-height:60% prevents panel from eclipsing the full image.
+//   inside .esper-container. max-height:60% prevents panel from eclipsing the full image
+
+import { escapeAttr, escapeHtml } from './html.js'
 
 // ---------------------------------------------------------------------------
 // Chip helpers
@@ -46,7 +48,7 @@ function renderChip (tagName, isExisting) {
 // Additional metadata rows (title, date, description) are included only when
 // suggestMetadata is true and the AI returned values for those fields.
 //
-// All rows use data-field matching the DC_WRITE_URIS keys in tropy.js so that
+// All rows use data-field matching the DC_WRITE_URIS keys in dc.js so that
 // #applyAccepted() can write accepted rows without any additional wiring.
 function renderMetadataTable (docType, metadataSuggestions, suggestMetadata) {
   const typeRow = `
@@ -283,6 +285,48 @@ const PANEL_STYLES = `
     color: rgb(255,255,255);
   }
 
+  /* Status area — degraded reads before analysis, write outcomes after Apply.
+   * Hidden until there is something to say, so the panel is unchanged in the
+   * ordinary case where everything worked. */
+  .autropy-status:empty {
+    display: none;
+  }
+
+  .autropy-status {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 8px;
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.4;
+    border-radius: 3px;
+    border: 1px solid rgb(210,210,210);
+    background: rgb(240,240,240);
+  }
+
+  .autropy-status__line {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+
+  .autropy-status__mark {
+    flex: none;
+    font-weight: 600;
+  }
+
+  .autropy-status__line--ok .autropy-status__mark { color: #3c8c4a; }
+  .autropy-status__line--warn .autropy-status__mark { color: #b8642a; }
+  .autropy-status__line--unknown .autropy-status__mark { color: #b03a3a; }
+  .autropy-status__line--info .autropy-status__mark { color: rgb(128,128,128); }
+
+  /* An unknown write is the one case the researcher must check by hand, so it
+   * gets emphasis rather than sitting level with the rest. */
+  .autropy-status__line--unknown {
+    font-weight: 500;
+  }
+
   /* ---------------------------------------------------------------------------
    * Dark mode overrides
    * Uses @media (prefers-color-scheme: dark) — works when Tropy follows the OS
@@ -345,6 +389,15 @@ const PANEL_STYLES = `
       color: rgb(204,204,204);
     }
 
+    .autropy-status {
+      border-color: rgb(60,60,60);
+      background: rgb(46,46,46);
+    }
+
+    .autropy-status__line--ok .autropy-status__mark { color: #7cc98a; }
+    .autropy-status__line--warn .autropy-status__mark { color: #e0a06a; }
+    .autropy-status__line--unknown .autropy-status__mark { color: #e88b8b; }
+
     .autropy-btn--primary {
       background: #5b8dd9;
       border-color: #5b8dd9;
@@ -364,15 +417,15 @@ const PANEL_STYLES = `
 //   existingTagNames — array of tag name strings already in the project
 //   suggestMetadata  — boolean; controls whether the metadata table is rendered
 //
-// UNVERIFIED ASSUMPTION: result.possible_tags is always an array of strings.
-// UNVERIFIED ASSUMPTION: result.confidence is a number 0.0–1.0.
+// `result` has already passed validateResult(), so possible_tags is an array and
+// confidence is either a number in 0–1 or null.
 export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
   const {
     summary = '',
     document_type: docType = 'unknown',
     possible_tags: tags = [],
     metadata_suggestions: metaSuggestions = null,
-    confidence = 0
+    confidence = null
   } = result
 
   const existingSet = new Set(
@@ -383,7 +436,8 @@ export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
     renderChip(tag, existingSet.has(tag.toLowerCase()))
   ).join('')
 
-  const confidencePct = `${Math.round(confidence * 100)}%`
+  // Omitted rather than shown as 0% or NaN% when the model gave no figure.
+  const confidencePct = confidence == null ? '' : `${Math.round(confidence * 100)}%`
 
   // Metadata section always rendered (for the type row); extra rows gated by suggestMetadata
   const metaSection = renderMetadataTable(docType, metaSuggestions, suggestMetadata)
@@ -408,6 +462,8 @@ export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
 
       ${metaSection}
 
+      <div class="autropy-status" id="autropy-status"></div>
+
       <div class="autropy-actions">
         <button class="autropy-btn" id="autropy-dismiss">Dismiss</button>
         <button class="autropy-btn autropy-btn--primary" id="autropy-apply">Apply accepted</button>
@@ -416,19 +472,35 @@ export function buildPanelHTML (result, existingTagNames, suggestMetadata) {
 }
 
 // ---------------------------------------------------------------------------
-// Escape helpers — never interpolate user/AI content unescaped into HTML
+// Status lines
 // ---------------------------------------------------------------------------
 
-function escapeHtml (str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+const STATUS_MARKS = {
+  ok: '✓',        // ✓ written and confirmed by Tropy
+  warn: '×',      // × Tropy refused it; safe to retry
+  unknown: '?',        // ? we do not know whether it landed
+  info: '·'       // · context, not an outcome
 }
 
-function escapeAttr (str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
+// Renders the status area contents. `lines` is [{ kind, text }] where kind is
+// one of ok | warn | unknown | info.
+//
+// `unknown` exists because a REST write can be acknowledged by SQLite and still
+// fail to reach us — a dropped connection after the commit is indistinguishable
+// from one before it. Tags and metadata can simply be re-read and retried;
+// a note cannot, so the researcher is told to look rather than offered a button
+// that might duplicate it.
+export function renderStatusLines (lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return ''
+
+  return lines.map(({ kind = 'info', text = '' }) => {
+    const mark = STATUS_MARKS[kind] || STATUS_MARKS.info
+    return `<div class="autropy-status__line autropy-status__line--${escapeAttr(kind)}">` +
+      `<span class="autropy-status__mark" aria-hidden="true">${mark}</span>` +
+      `<span>${escapeHtml(text)}</span>` +
+      '</div>'
+  }).join('')
 }
+
+// Escaping lives in html.js — the note writer needs the same helpers, and the
+// data layer must not import a UI template to get them.

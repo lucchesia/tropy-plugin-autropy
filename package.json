@@ -1,14 +1,15 @@
 {
   "name": "tropy-plugin-autropy",
   "productName": "Autropy",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Multimodal AI analysis for Tropy: suggests tags and descriptions with researcher review.",
   "author": "Anita Lucchesi",
   "homepage": "https://github.com/lucchesia/tropy-plugin-autropy",
   "main": "index.js",
   "scripts": {
     "build": "rollup -c rollup.config.mjs",
-    "watch": "rollup -c rollup.config.mjs --watch"
+    "watch": "rollup -c rollup.config.mjs --watch",
+    "test": "node --test \"test/*.test.mjs\""
   },
   "hooks": {
     "export": true
@@ -16,17 +17,19 @@
   "options": [
     {
       "field": "model",
-      "label": "Model ID (e.g. gemini-2.5-flash, gpt-4o, claude-opus-4-6)",
+      "label": "Model ID (e.g. claude-sonnet-5, gemini-2.5-flash, gpt-4o)",
       "type": "string",
       "default": "",
-      "required": true
+      "required": true,
+      "hint": "The provider's API identifier, not its display name — claude-sonnet-5, not \"Claude Sonnet 5\"."
     },
     {
       "field": "apiKey",
       "label": "API Key",
-      "type": "string",
+      "type": "password",
       "default": "",
-      "required": true
+      "required": true,
+      "hint": "Stored as plain text in the plugins config.json."
     },
     {
       "field": "port",
