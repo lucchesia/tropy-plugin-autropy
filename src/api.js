@@ -89,6 +89,67 @@ export function providerFor (model) {
   return null
 }
 
+// The models this key can actually reach.
+//
+// Hardcoding a list of "latest" model IDs guarantees it is wrong within months
+// and fails as a 404 the researcher has already waited for. Every provider
+// publishes what a key can use; asking is both current and honest — the picker
+// offers what this account has, not what the plugin was built believing.
+//
+// Only the provider the configured model routes to is ever contacted. There is
+// one apiKey; asking OpenAI for its catalogue with an Anthropic key would send
+// that credential to a host the researcher never gave it to.
+//
+// Unbilled, and failure is not an error: an unreachable list leaves the picker
+// with the configured model alone, which is exactly where it was before.
+export async function listModels ({ model, apiKey, signal, baseUrl } = {}) {
+  const provider = providerFor(model)
+  if (!provider || !apiKey) return []
+
+  try {
+    if (provider === 'anthropic') {
+      const res = await fetch('https://api.anthropic.com/v1/models?limit=100', {
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        signal
+      })
+      if (!res.ok) return []
+      const body = await res.json()
+      return (body?.data ?? []).map(m => m.id).filter(Boolean)
+    }
+
+    if (provider === 'openai') {
+      const root = baseUrl || 'https://api.openai.com/v1'
+      const res = await fetch(`${root}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal
+      })
+      if (!res.ok) return []
+      const body = await res.json()
+      return (body?.data ?? []).map(m => m.id).filter(Boolean)
+    }
+
+    if (provider === 'gemini') {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=200`,
+        { signal })
+      if (!res.ok) return []
+      const body = await res.json()
+      return (body?.models ?? [])
+        // Only what can answer a generateContent call; the list also carries
+        // embedding and tuning-only models, which would fail at call time.
+        .filter(m => (m.supportedGenerationMethods ?? []).includes('generateContent'))
+        .map(m => String(m.name || '').replace(/^models\//, ''))
+        .filter(Boolean)
+    }
+  } catch {
+    // Offline, rate-limited, a key without list permission: none of these are
+    // reasons to stop the researcher analyzing anything.
+    return []
+  }
+
+  return []
+}
+
 // Builds the list the panel's model picker offers.
 //
 // The configured Model ID is always first and always included — it is what the

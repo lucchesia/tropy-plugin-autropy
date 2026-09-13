@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { analyze, providerFor, resolveModelChoices } from '../src/api.js'
+import { analyze, listModels, providerFor, resolveModelChoices } from '../src/api.js'
 import {
   ABSENT,
   DECLINED,
@@ -277,4 +277,100 @@ test('the picker marks which models have already been run', () => {
   assert.match(html, /<option value="claude-opus-5" selected>claude-opus-5<\/option>/)
   assert.match(html, /claude-sonnet-5 · already run/)
   assert.doesNotMatch(html, /claude-haiku-4-5 · already run/)
+})
+
+// ── asking the provider what this key can reach ────────────────────────────
+
+function listStub (handler) {
+  const calls = []
+  const real = globalThis.fetch
+
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init })
+    return handler(String(url), init)
+  }
+
+  return { calls, restore: () => { globalThis.fetch = real } }
+}
+
+const listOk = body => ({ ok: true, json: async () => body })
+
+//
+// Hardcoding "the latest models" guarantees the list is wrong within months and
+// fails as a 404 the researcher has already waited for. Asking is current — and
+// it must ask only the one provider the key belongs to.
+
+test('an Anthropic key is never used to ask another provider for its catalogue', async () => {
+  // The whole point of the same-provider rule: one apiKey, so a stray request
+  // to another host is a credential leak, not a failed feature.
+  const f = listStub(url => {
+    assert.match(url, /^https:\/\/api\.anthropic\.com\//, `contacted ${url}`)
+    return listOk({ data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }] })
+  })
+
+  try {
+    const models = await listModels({ model: 'claude-opus-5', apiKey: 'sk-test' })
+
+    assert.deepEqual(models, ['claude-opus-5', 'claude-sonnet-5'])
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls[0].init.headers['x-api-key'], 'sk-test')
+    assert.ok(!('Authorization' in f.calls[0].init.headers))
+  } finally {
+    f.restore()
+  }
+})
+
+test('an unrecognized model id asks nobody', async () => {
+  const f = listStub(() => { throw new Error('should not be called') })
+
+  try {
+    assert.deepEqual(await listModels({ model: 'llama3', apiKey: 'k' }), [])
+    assert.deepEqual(await listModels({ model: 'claude-opus-5', apiKey: '' }), [])
+    assert.equal(f.calls.length, 0)
+  } finally {
+    f.restore()
+  }
+})
+
+test('Gemini offers only models that can answer a generateContent call', async () => {
+  const f = listStub(() => listOk({
+    models: [
+      { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] }
+    ]
+  }))
+
+  try {
+    assert.deepEqual(
+      await listModels({ model: 'gemini-2.5-flash', apiKey: 'k' }),
+      ['gemini-2.5-flash'])
+  } finally {
+    f.restore()
+  }
+})
+
+test('an unreachable list is not an error — it leaves the picker as it was', async () => {
+  const bad = listStub(() => ({ ok: false, json: async () => ({}) }))
+  try {
+    assert.deepEqual(await listModels({ model: 'claude-opus-5', apiKey: 'k' }), [])
+  } finally {
+    bad.restore()
+  }
+
+  const offline = listStub(() => { throw new Error('ENOTFOUND') })
+  try {
+    assert.deepEqual(await listModels({ model: 'claude-opus-5', apiKey: 'k' }), [])
+  } finally {
+    offline.restore()
+  }
+})
+
+test('a fetched list is still filtered by the same-provider rule', async () => {
+  // Defence in depth: the boundary holds wherever the list came from. A
+  // provider returning something odd must not widen what the key can reach.
+  const { models, rejected } = resolveModelChoices(
+    'claude-opus-5', 'claude-sonnet-5,gpt-4o,Claude Opus 5')
+
+  assert.deepEqual(models, ['claude-opus-5', 'claude-sonnet-5'])
+  assert.equal(rejected.length, 2)
 })

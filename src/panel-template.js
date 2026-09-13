@@ -853,14 +853,14 @@ function renderSynthesis (run) {
        pages — the rest could not be analyzed.</p>`
     : ''
 
-  const noteToggle = locked
+  // Reviewed and written exactly like a page summary: edit it, or empty the box
+  // to decline it. Saying where it lands matters because Tropy has no
+  // item-level note — it goes on the first analyzed page.
+  const destination = locked
     ? ''
-    : `<label class="autropy-check">
-          <input type="checkbox" id="autropy-synthesis-note"${
-  s.accept.note && !stale ? ' checked' : ''}${stale ? ' disabled' : ''}>
-          Also write this as a note on page ${
-  photoIndex(run, synthesisNotePhoto(run)) + 1}
-        </label>`
+    : `<p class="autropy-note">Written as a note on page ${
+  photoIndex(run, synthesisNotePhoto(run)) + 1}, where Tropy keeps item-wide
+       notes. Empty the box above to decline it.</p>`
 
   return `
       <div class="autropy-header">
@@ -875,7 +875,7 @@ function renderSynthesis (run) {
         rows="6"${locked || stale ? ' readonly' : ''}
       >${escapeHtml(s.summaryDraft || '')}</textarea>
 
-      ${noteToggle}
+      ${destination}
       ${renderSynthesisTable(run)}
 
       <div class="autropy-status" id="autropy-status"></div>`

@@ -30,13 +30,13 @@ import {
   setResult,
   setSummaryDraft,
   setSynthesis,
+  setSynthesisDraft,
   synthesisKey,
   synthesisNoteOp,
   synthesisNotePhoto,
   synthesisSources,
   tagOp,
   toggleSynthesisField,
-  toggleSynthesisNote
 } from '../src/run.js'
 
 const SYNTH = {
@@ -108,7 +108,6 @@ test('editing a page summary makes the item summary stale', () => {
 
 test('a stale item summary is not written, even if it was accepted', () => {
   const run = synthesized(item(4))
-  toggleSynthesisNote(run)
   toggleSynthesisField(run, 'title')
 
   const synthNotes = r => collectWrites(r).notes.filter(n => n.kind === SYNTHESIS)
@@ -150,11 +149,15 @@ test('the item summary note is opt-in', () => {
   // the project.
   const run = synthesized(item(4))
 
-  assert.equal(collectWrites(run).notes.some(n => n.kind === SYNTHESIS), false)
-
-  toggleSynthesisNote(run)
-
+  // Reviewed and written exactly like a page summary: it is there unless the
+  // researcher empties the box. Behind an opt-in checkbox it was possible to
+  // generate an item summary, review it, apply, and have nothing written.
   assert.equal(collectWrites(run).notes.some(n => n.kind === SYNTHESIS), true)
+
+  setSynthesisDraft(run, '   ')
+
+  assert.equal(collectWrites(run).notes.some(n => n.kind === SYNTHESIS), false,
+    'emptying the box declines it')
 })
 
 test('the item summary attaches to the first analyzed page', () => {
@@ -184,7 +187,6 @@ test('the synthesis note has its own ledger key, not the page it lands on', () =
   // It attaches to page 1, which already has a note of its own. Sharing a key
   // would make one suppress the other.
   const run = synthesized(item(4))
-  toggleSynthesisNote(run)
 
   recordOperation(run, {
     key: synthesisNoteOp(), kind: 'note', status: ACKNOWLEDGED
@@ -198,7 +200,6 @@ test('the synthesis note has its own ledger key, not the page it lands on', () =
 
 test('an unknown item-summary write is never repeated', () => {
   const run = synthesized(item(4))
-  toggleSynthesisNote(run)
 
   recordOperation(run, { key: synthesisNoteOp(), kind: 'note', status: UNKNOWN })
 
@@ -260,13 +261,16 @@ test('before it is written the panel offers to write it, and says what it costs'
   assert.match(html, /one more request to the model/)
 })
 
-test('once written it shows the text, the note toggle and the item metadata', () => {
+test('once written it shows the editable text, where it lands, and the metadata', () => {
   const html = panel(synthesized(item(4)))
 
   assert.match(html, /A six-page Vatican dossier/)
-  assert.match(html, /id="autropy-synthesis-note"/)
-  assert.match(html, /Also write this as a note on page 1/)
+  assert.match(html, /id="autropy-summary"/)
+  assert.match(html, /Written as a note on page 1/)
+  assert.match(html, /Empty the box above to decline it/)
   assert.match(html, /Dossier Falkenstein/)
+  assert.doesNotMatch(html, /autropy-synthesis-note/,
+    'no second consent: generating it is the request')
 })
 
 test('a stale summary warns and cannot be edited', () => {
@@ -278,7 +282,6 @@ test('a stale summary warns and cannot be edited', () => {
   assert.match(html, /autropy-warning/)
   assert.match(html, /no longer reflects the pages/)
   assert.match(html, /readonly/)
-  assert.match(html, /id="autropy-synthesis-note" disabled|disabled>/)
 })
 
 test('an incomplete synthesis says how many pages it had', () => {
@@ -287,12 +290,15 @@ test('an incomplete synthesis says how many pages it had', () => {
   assert.match(html, /Written from 4 of 6/)
 })
 
-test('the item summary note says it describes the whole item', () => {
+test('the item summary note says it describes the whole item, with its own glyph', () => {
   // It lands on one page, so without this it reads as a claim about that page.
+  // The glyph is what makes it recognizable among the page notes beside it.
   const text = readFileSync(
     fileURLToPath(new URL('../src/plugin.js', import.meta.url)), 'utf8')
 
-  assert.match(text, /Item summary — describes all pages of this item/)
+  assert.match(text, /Machine-generated item summary — describes all pages of this item/)
+  assert.match(text, /Machine-generated page summary/)
+  assert.match(text, /synthesis \? '&#128218;' : '&#128196;'/)
 })
 
 // ── the item summary has its own lock ──────────────────────────────────────
@@ -314,7 +320,6 @@ test('the item summary is still editable after the page notes are applied', () =
   assert.equal(isSynthesisLocked(run), false, 'the summary is not')
 
   toggleSynthesisField(run, 'title')
-  toggleSynthesisNote(run)
 
   assert.deepEqual(collectWrites(run).fields, { title: 'Dossier Falkenstein' })
   assert.equal(collectWrites(run).notes.some(n => n.kind === SYNTHESIS), true)

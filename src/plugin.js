@@ -21,7 +21,7 @@ import { readFile } from 'node:fs/promises'
 // in four places and had already drifted (the installed build said alpha.1
 // while the repo said alpha.2), which corrupts note provenance.
 import { version as AUTROPY_VERSION } from '../package.json'
-import { analyze, resolveModelChoices } from './api.js'
+import { analyze, listModels, resolveModelChoices } from './api.js'
 import {
   isItemMode,
   isProjectMode,
@@ -78,11 +78,19 @@ import {
   tagOp,
   toggleField,
   toggleSynthesisField,
-  toggleSynthesisNote,
   toggleTag
 } from './run.js'
 
 const AUTROPY_NOTE_MARKER = '[AUTROPY]'
+
+// Local time in the note header, ISO/UTC in the machine footer. The header is
+// read by a person who wants to know when this happened in their own day; the
+// footer is read by a program, or by someone reconciling two machines.
+function formatLocal (date) {
+  const p = n => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ` +
+    `${p(date.getHours())}:${p(date.getMinutes())}`
+}
 
 const DEFAULT_PORT = 2029
 const NAV_POLL_MS = 300
@@ -148,6 +156,7 @@ class AutropyPlugin {
   #gateway = null
   #activeRun = null            // { id, controller, itemId, photoId } while analyzing
   #runCounter = 0
+  #offeredModels = []          // what this key can reach, asked once at load
 
   // ── Tropy state access ───────────────────────────────────────────────────
 
@@ -269,8 +278,15 @@ class AutropyPlugin {
 
   // The models the panel may offer. Rejections are reported once, at load, so a
   // typo or a cross-provider entry is visible without waiting for a run.
+  // The picker's contents. The configured Model ID is always first and always
+  // present; the rest is whatever this key can reach.
+  //
+  // The fetched list still goes through resolveModelChoices, which drops
+  // anything routing to another provider. That is not redundant: there is one
+  // apiKey, and the boundary must hold wherever the list came from.
   #models () {
-    const { models, rejected } = resolveModelChoices(this.options.model, this.options.models)
+    const { models, rejected } =
+      resolveModelChoices(this.options.model, this.#offeredModels.join(','))
 
     for (const { model, reason } of rejected) {
       this.context.logger.warn(`[AUTROPY] not offering "${model}": ${reason}`)
@@ -441,31 +457,57 @@ class AutropyPlugin {
       // can say how many pages would actually be billed.
       const transcriptions = await this.#readTranscriptions(run, gateway, siblings)
 
-      const promptFor = id => buildPrompt(
-        prompt, existingTagNames, itemMetadata, outputLanguage, transcriptions.get(id))
+      const promptFor = (id, context) => buildPrompt(
+        prompt, existingTagNames, itemMetadata, outputLanguage,
+        transcriptions.get(id), context)
 
-      const digestFor = new Map(
-        siblings.map(id => [id, digest(promptFor(id))]))
+      const keyFor = (id, promptDigest) => photoCacheKey({
+        projectPath,
+        itemId,
+        photoId: id,
+        model,
+        promptDigest,
+        imageFingerprint: imageFingerprint(this.#getState()?.photos?.[id])
+      })
+
+      // Each page's prompt now carries the summaries of the pages before it, so
+      // a page's cache key depends on its predecessors' results. Walking the
+      // pages forward through the cache is the only way to say honestly what a
+      // full run would cost: the moment one page is a miss, every page after it
+      // is a new call too, because its context contains a summary that does not
+      // exist yet.
+      const plan = new Map()
+      {
+        const context = []
+        let broken = force
+
+        for (const [i, id] of siblings.entries()) {
+          const text = promptFor(id, context)
+          const promptDigest = digest(text)
+          const hit = broken ? null : this.#photoCache.get(keyFor(id, promptDigest))
+
+          plan.set(id, { context: [...context], prompt: text, promptDigest, cached: !!hit })
+
+          if (hit?.result?.summary) context.push({ page: i + 1, text: hit.result.summary })
+          else broken = true
+        }
+      }
 
       let photoIds = [photoId]
 
       if (siblings.length > 1) {
-        // Now that the prompt exists, the cost can be stated exactly rather
-        // than estimated: a page already analyzed under this model and prompt
-        // replays for nothing.
-        const wouldBill = force
-          ? siblings
-          : siblings.filter(id => !this.#photoCache.has(photoCacheKey({
-            projectPath,
-            itemId,
-            photoId: id,
-            model,
-            promptDigest: digestFor.get(id),
-            imageFingerprint: imageFingerprint(this.#getState()?.photos?.[id])
-          })))
+        // Now that the prompts exist, the cost can be stated exactly rather
+        // than estimated: a page already analyzed under this model, prompt and
+        // preceding context replays for nothing.
+        const wouldBill = siblings.filter(id => !plan.get(id).cached)
 
         const scope = await this.#askScope({
-          photoIds: siblings, current: photoId, wouldBill: wouldBill.length
+          photoIds: siblings,
+          current: photoId,
+          wouldBill: wouldBill.length,
+          // The item summary is part of the same pass now, so its call belongs
+          // in the count the researcher approves — not sprung on them later.
+          synthesis: siblings.length > 1
         })
 
         if (scope == null) {
@@ -486,28 +528,49 @@ class AutropyPlugin {
       // Photos run one at a time. Concurrency would be faster and worse: the
       // panel could not report honest progress, a Stop would leave calls in
       // flight that are billed anyway, and providers rate-limit bursts.
+      // Seeded from the plan so a single-page scope still sees whatever
+      // preceding pages the cache already holds — the same context the planned
+      // key was computed from, so the two agree.
+      const context = [...(plan.get(photoIds[0])?.context ?? [])]
+
       for (const id of photoIds) {
         if (controller.signal.aborted) break
 
         const entry = photoEntry(run, id)
         const record = this.#getState()?.photos?.[id]
+        const page = siblings.indexOf(id) + 1
 
         entry.status = 'running'
         this.#updateProgress(run)
 
         try {
+          // Rebuilt here rather than taken from the plan: a page that missed
+          // the cache changes the context of every page after it, and the
+          // prompt must reflect what actually happened, not what was predicted.
+          const text = promptFor(id, context)
+
           await this.#analyzePhoto({
             run,
             photoId: id,
             photo: record,
             model,
             apiKey,
-            prompt: promptFor(id),
-            promptDigest: digestFor.get(id),
+            prompt: text,
+            promptDigest: digest(text),
             hasTranscription: transcriptions.has(id),
+            contextPages: context.length,
             force,
             controller
           })
+
+          // What this page's reading was actually built from — the note says
+          // so, and a reader should not have to take the summary's word for it.
+          entry.hadTranscription = transcriptions.has(id)
+          entry.contextPages = Math.min(context.length, 3)
+
+          if (entry.status === 'done' && entry.result?.summary) {
+            context.push({ page, text: entry.result.summary })
+          }
         } catch (err) {
           if (controller.signal.aborted) break
 
@@ -559,10 +622,23 @@ class AutropyPlugin {
         if (entry.status === 'idle') entry.status = 'skipped'
       }
 
+      // The page summaries exist so that the item summary can exist, so it is
+      // written in the same pass, under the same approval, and is what the
+      // panel opens on. Behind a second button it was too easy to review the
+      // pages, apply, and never notice the item summary was not written.
+      if (canSynthesize(run)) {
+        await this.#synthesize(run, { controller, runId })
+      }
+
+      if (controller.signal.aborted) return
+
+      const landing = run.synthesis ? SYNTHESIS : done[0].photoId
+
       if (!this.#current || this.#current.run !== run) {
         this.#openPanel(run, done[0].photoId)
+        if (landing === SYNTHESIS) this.#renderPanelInPlace(run, SYNTHESIS)
       } else {
-        this.#renderPanelInPlace(run, this.#current.photoId)
+        this.#renderPanelInPlace(run, landing)
       }
     } catch (err) {
       if (controller.signal.aborted) {
@@ -628,7 +704,7 @@ class AutropyPlugin {
 
   async #analyzePhoto ({
     run, photoId, photo, model, apiKey, prompt, promptDigest,
-    hasTranscription = false, force, controller
+    hasTranscription = false, contextPages = 0, force, controller
   }) {
     const { logger } = this.context
 
@@ -671,7 +747,8 @@ class AutropyPlugin {
       `[AUTROPY] calling model: ${model} — photo ${photoId}, ` +
       `${Math.round(scan.bytes / 1024)} KB ${scan.mediaType}` +
       `${photo.page > 0 ? `, page ${photo.page + 1}` : ''}` +
-      `${hasTranscription ? ', with transcription' : ', no transcription'}`)
+      `${hasTranscription ? ', with transcription' : ', no transcription'}` +
+      `${contextPages > 0 ? `, ${Math.min(contextPages, 3)} preceding page(s) in view` : ''}`)
 
     const { result, servedModel } = await analyze({
       model,
@@ -703,11 +780,15 @@ class AutropyPlugin {
   // them, so it has to happen after they have reviewed the pages; generating it
   // the moment the last page landed would describe the item from text they were
   // about to correct.
-  async #synthesize (run) {
+  // Called two ways: at the end of a multi-page run, sharing that run's
+  // controller so Stop stops this too; and from "Generate again", which owns
+  // its own. `owned` says which, and therefore who tears down.
+  async #synthesize (run, { controller: borrowed = null, runId: borrowedId = null } = {}) {
     const { logger } = this.context
     const { apiKey, outputLanguage } = this.options
+    const owned = !borrowed
 
-    if (this.#activeRun) {
+    if (owned && this.#activeRun) {
       logger.warn('[AUTROPY] analysis already running — ignoring this click')
       return
     }
@@ -718,16 +799,19 @@ class AutropyPlugin {
     const sourceKey = synthesisKey(run)
     const incomplete = sources.length < run.photos.length
 
-    const runId = ++this.#runCounter
-    const controller = new AbortController()
-    this.#activeRun = {
-      id: runId,
-      controller,
-      itemId: run.itemId,
-      photoId: this.#readNav().photoId,
-      projectPath: run.projectPath
+    const runId = owned ? ++this.#runCounter : borrowedId
+    const controller = borrowed ?? new AbortController()
+
+    if (owned) {
+      this.#activeRun = {
+        id: runId,
+        controller,
+        itemId: run.itemId,
+        photoId: this.#readNav().photoId,
+        projectPath: run.projectPath
+      }
+      this.#setToolbarBusy(true)
     }
-    this.#setToolbarBusy(true)
 
     logger.warn(
       `[AUTROPY] writing the item summary — run ${run.id}, ` +
@@ -760,7 +844,7 @@ class AutropyPlugin {
       logger.warn(
         `[AUTROPY] item summary complete — confidence ${result.confidence ?? 'not reported'}`)
 
-      this.#renderPanelInPlace(run, SYNTHESIS)
+      if (owned) this.#renderPanelInPlace(run, SYNTHESIS)
     } catch (err) {
       if (controller.signal.aborted) {
         logger.warn('[AUTROPY] item summary cancelled')
@@ -768,10 +852,24 @@ class AutropyPlugin {
       }
 
       logger.error({ stack: err.stack }, `[AUTROPY] item summary failed: ${err.message}`)
-      this.#fatal('Autropy could not write the item summary', err.message)
+
+      // Inside a run the pages are already analyzed and reviewable; losing the
+      // item summary is a setback, not a failure of the whole run, and the
+      // panel says so rather than a modal saying nothing worked.
+      if (owned) {
+        this.#fatal('Autropy could not write the item summary', err.message)
+      } else {
+        run.notices.push({
+          kind: 'warn',
+          text: `The item summary could not be written (${err.message}). ` +
+                'The page summaries are ready to review; use Generate again to retry.'
+        })
+      }
     } finally {
-      if (this.#activeRun?.id === runId) this.#activeRun = null
-      if (!this.#activeRun) this.#setToolbarBusy(false)
+      if (owned) {
+        if (this.#activeRun?.id === runId) this.#activeRun = null
+        if (!this.#activeRun) this.#setToolbarBusy(false)
+      }
     }
   }
 
@@ -781,7 +879,7 @@ class AutropyPlugin {
   //
   // Tropy resolves dialog.show('message-box', …) to { response, checked }, where
   // response is the index of the button pressed. Verified in beta.5's bundle.
-  async #askScope ({ photoIds, current, wouldBill }) {
+  async #askScope ({ photoIds, current, wouldBill, synthesis = false }) {
     const count = photoIds.length
     const position = photoIds.indexOf(current) + 1
     const reused = count - wouldBill
@@ -792,7 +890,11 @@ class AutropyPlugin {
       (reused > 0
         ? `; ${reused} page(s) were already analyzed with this model and prompt ` +
           'and will be reused without being billed again.'
-        : ', one per page, each billed.')
+        : ', one per page, each billed.') +
+      (synthesis
+        ? '\n\nOne further request then writes the item summary from those pages. ' +
+          'It sends the page summaries as text, not the images again.'
+        : '')
 
     try {
       const { response } = await this.context.dialog.show('message-box', {
@@ -1087,11 +1189,6 @@ class AutropyPlugin {
         })
       })
     }
-
-    panel.querySelector('#autropy-synthesis-note')?.addEventListener('change', e => {
-      toggleSynthesisNote(run)
-      e.target.checked = !!run.synthesis?.accept.note
-    })
 
     panel.querySelector('#autropy-synthesize')?.addEventListener('click', () => {
       this.#synthesize(run).catch(err => {
@@ -1398,7 +1495,8 @@ class AutropyPlugin {
 
     for (const note of notes) {
       const isSynthesis = note.kind === SYNTHESIS
-      const html = this.#buildNoteHtml(run, note.text, { synthesis: isSynthesis })
+      const html = this.#buildNoteHtml(
+        run, note.text, { synthesis: isSynthesis, photoId: note.photoId })
       if (!html) continue
 
       const key = isSynthesis ? synthesisNoteOp() : noteOp(note.photoId)
@@ -1470,22 +1568,14 @@ class AutropyPlugin {
     }
   }
 
-  #buildNoteHtml (run, summary, { synthesis = false } = {}) {
+  #buildNoteHtml (run, summary, { synthesis = false, photoId = null } = {}) {
     const body = textToParagraphs(summary)
     if (!body) return null
-
-    // An item summary lands on one page but describes the whole item. Saying so
-    // in the note stops it reading as a claim about that page alone.
-    const heading = synthesis
-      ? '<p><strong>Item summary — describes all pages of this item</strong></p>'
-      : ''
 
     // `run.model` and not `this.options.model`: the preference can have changed
     // since the analysis ran, and a note that names the wrong model is a
     // provenance error in the researcher's own data.
     //
-    // The run id is here so an `unknown` write can be found by hand — it is the
-    // one outcome Autropy refuses to resolve on the researcher's behalf.
     // The served model is recorded only when it differs from the one asked for,
     // which happens when the configured ID is an alias. Saying both is the
     // honest record: one is what the researcher chose, the other is what ran.
@@ -1493,11 +1583,45 @@ class AutropyPlugin {
       ? ` (served ${run.servedModel})`
       : ''
 
+    const now = new Date()
+
+    // A header, not only a footer. Provenance a reader meets after the prose
+    // has already been read as fact is provenance that arrived too late — and
+    // the distinct glyph is what makes an item summary recognizable at a glance
+    // among the page notes it sits beside.
+    const glyph = synthesis ? '&#128218;' : '&#128196;'
+    const kind = synthesis
+      ? 'Machine-generated item summary — describes all pages of this item'
+      : 'Machine-generated page summary'
+
+    const entry = photoId == null ? null : photoEntry(run, photoId)
+
+    const basis = synthesis
+      ? `Based on ${synthesisSources(run).length} page summaries, ` +
+        'as you reviewed them.'
+      : [
+          entry?.hadTranscription
+            ? 'Based on the image and an existing transcription.'
+            : 'Based on the image; no transcription was available.',
+          entry?.contextPages > 0
+            ? `Written with the ${entry.contextPages} preceding page(s) in view, ` +
+              'so it is not an independent reading of this page alone.'
+            : ''
+        ].filter(Boolean).join(' ')
+
+    const header =
+      `<p><strong>${glyph} ${escapeHtml(kind)}</strong><br>` +
+      `Generated ${escapeHtml(formatLocal(now))} by ${escapeHtml(run.model + served)}<br>` +
+      `${escapeHtml(basis)}</p>`
+
+    // The machine-readable line stays. It is what lets a write whose outcome is
+    // UNKNOWN be found by hand later — the one outcome Autropy refuses to
+    // resolve on the researcher's behalf — and the run id is the handle.
     const provenance =
       `${AUTROPY_NOTE_MARKER} model: ${run.model}${served} | ` +
-      `${new Date().toISOString()} | v${AUTROPY_VERSION} | run ${run.id}`
+      `${now.toISOString()} | v${AUTROPY_VERSION} | run ${run.id}`
 
-    return `${heading}${body}<p>---<br>${escapeHtml(provenance)}</p>`
+    return `${header}${body}<p>---<br>${escapeHtml(provenance)}</p>`
   }
 
   // ── teardown ─────────────────────────────────────────────────────────────
@@ -1575,6 +1699,20 @@ class AutropyPlugin {
 
     this.#injectStyles()
 
+    // Ask the provider what this key can actually reach, so the picker offers
+    // current model IDs instead of a list baked into the plugin that goes stale
+    // within months. Not awaited and never fatal: the picker falls back to the
+    // configured model alone, which is where it was before.
+    listModels({ model: this.options.model, apiKey: this.options.apiKey })
+      .then(models => {
+        this.#offeredModels = models
+        if (models.length > 0) {
+          this.context.logger.warn(
+            `[AUTROPY] ${this.#models().length} model(s) offered in the picker`)
+        }
+      })
+      .catch(() => {})
+
     // load() runs before Tropy renders the toolbar, and the esper tool group
     // only exists once an item with a photo is selected — which may be much
     // later. A MutationObserver injects the moment it appears.
@@ -1638,7 +1776,6 @@ class AutropyPlugin {
 
 AutropyPlugin.defaults = {
   model: '',
-  models: '',
   apiKey: '',
   port: DEFAULT_PORT,
   suggestMetadata: false,

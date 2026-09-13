@@ -87,8 +87,39 @@ function normalizeTranscription (transcription) {
   return { text, source }
 }
 
+// The rolling window of preceding page summaries.
+//
+// A dossier is not a pile of unrelated images: page four is often the second
+// half of a letter begun on page three. Without this the model reads every page
+// cold and the item summary has to reconstruct continuity that was there all
+// along.
+//
+// It is capped rather than cumulative. An unbounded window would make the last
+// page of a 111-photo item carry the whole item in its prompt — paid for on
+// every page, and dominated by material the page itself has nothing to do with.
+// Capping it also bounds how far one bad reading can travel forward.
+export const CONTEXT_WINDOW = 3
+
+export function buildContextBlock (context) {
+  if (!Array.isArray(context) || context.length === 0) return ''
+
+  const lines = context
+    .slice(-CONTEXT_WINDOW)
+    .map(c => `  [page ${c.page}] ${String(c.text).trim()}`)
+    .join('\n')
+
+  if (!lines) return ''
+
+  return '\n\nPRECEDING PAGES OF THIS SAME ITEM (Autropy\'s own summaries of the ' +
+    'pages just before this one, given so you can follow a document that ' +
+    'continues across pages. They are machine readings, not transcriptions, and ' +
+    'may be wrong — describe THIS page, and use them only to place it):\n' +
+    lines
+}
+
 export function buildPrompt (
-  userPrompt, existingTags, itemMetadata, outputLanguage, transcription = null
+  userPrompt, existingTags, itemMetadata, outputLanguage, transcription = null,
+  context = null
 ) {
   let instructionBlock
 
@@ -149,8 +180,16 @@ export function buildPrompt (
       `"""\n${t.text}\n"""`
   }
 
+  // The preceding pages, so a document that runs across pages can be read as
+  // one. This is what makes a page summary useful to the item summary built
+  // from it — but it also means this page's reading is no longer independent of
+  // the pages before it, and the model is told exactly what it is being given:
+  // Autropy's own machine summaries, not transcriptions, and possibly wrong.
+  const contextBlock = buildContextBlock(context)
+
   // JSON format block is always appended — required for parseResult() to succeed.
-  let prompt = `${instructionBlock}${transcriptionBlock}\n\n${JSON_FORMAT_BLOCK}`
+  let prompt =
+    `${instructionBlock}${contextBlock}${transcriptionBlock}\n\n${JSON_FORMAT_BLOCK}`
 
   // Language instruction — appended last, after the format block, so the model
   // sees it as a final override. Keys and field names stay in English regardless.

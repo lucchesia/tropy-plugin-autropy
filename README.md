@@ -67,45 +67,64 @@ the panel says how many did not work. Failed and unreached pages write nothing.
 Each page keeps its own summary, editable independently, and **Apply accepted** writes one note per
 page. Tags are pooled across the whole item and de-duplicated.
 
+**Each page is read with the three pages before it in view.** A dossier is not a pile of unrelated
+images — page four is often the second half of a letter begun on page three — so each page's prompt
+carries Autropy's summaries of the pages just before it, described to the model as machine readings
+that may be wrong. The cost of this is worth knowing: a page summary is no longer an independent
+reading of that page, and the note it becomes says so. The window is capped at three so that one bad
+reading cannot travel the length of a long item, and so a 111-page item does not end up carrying
+itself in every prompt.
+
 **Metadata is not suggested per page.** Tropy keeps one value per field, so six pages proposing six
 descriptions would mean the last one silently wins. It comes from the item summary instead.
 Single-photo items are unaffected and still suggest metadata as before.
 
 ### The item summary
 
-One step past the last page in the pager is **Item summary** — one description of the item as a
-whole, written from the page summaries. It is a text-only request: it reads the page descriptions,
-not the images again.
+**Item summary** is one description of the item as a whole, written from the page summaries. On a
+multi-page item it is written in the same pass and is what the panel opens on; the pages sit behind
+the pager. It is a text-only request — it reads the page descriptions, not the images again — and
+the scope dialog counts it before anything is billed.
 
-You ask for it; it does not happen on its own. It reads your summaries **as you have left them**, so
-the point is to review the pages first and correct anything wrong before pressing **Generate item
-summary**. If you then edit a page summary, the item summary is marked stale and neither its text
-nor its metadata can be applied until you generate it again — an item description quietly derived
-from text you had already rejected would be the worst mistake this tool could make.
+It is reviewed and written **exactly like a page summary**: edit the text, or empty the box to
+decline it. There is no separate checkbox. An earlier version made it opt-in, which meant you could
+generate an item summary, read it, press Apply, and have nothing written.
 
-It offers:
+Tropy has no item-level note, so it attaches to the first analyzed page. Its first line says it
+describes the whole item, and it carries a different glyph from a page note so the two are
+distinguishable at a glance.
 
-- **Item metadata** — title, date and description for the whole item, accepted row by row, with the
-  same `replaces:` warning as anywhere else.
-- **A note, if you want one** — off by default. Per-page notes record the analysis; an item summary
-  is an interpretation. Tropy has no item-level note, so it attaches to the first analyzed page and
-  says in its first line that it describes the whole item.
+If you edit a page summary afterwards, the item summary is marked stale and neither its text nor its
+metadata can be applied until you press **Generate again** — an item description quietly derived
+from text you had already rejected would be the worst mistake this tool could make. Regenerating is
+one more request, which is the honest price of having corrected the page.
+
+It also offers **item metadata** — title, date and description for the whole item, accepted row by
+row, with the same `replaces:` warning as anywhere else.
 
 If some pages could not be analyzed, the model is told so and the summary says how many pages it
-actually covers.
+actually covers. If the item summary itself fails, the page summaries are kept and reviewable.
 
 ### Comparing models
 
-Set **Other model IDs to offer** in Preferences and the review panel gains a model picker. Pick one
-and press **Re-analyze** to read the same document with a different model.
+The review panel has a model picker. Pick a model and press **Re-analyze** to read the same document
+with a different one.
+
+You do not configure the list. At startup Autropy asks your provider which models your API key can
+actually reach and offers those, so the picker is current rather than a list baked into the plugin
+that goes stale within months. Tropy's plugin preferences cannot render a dropdown of arbitrary
+values — the only selects it offers are bound to Tropy's own ontology — so **Model ID** stays a text
+field, and it is what decides which provider is asked.
 
 A model you have already run on this item is marked *already run*: switching back to it is instant
 and costs nothing, so you can hold two readings of the same page side by side.
 
-Every model in that list must come from the same provider as your Model ID. There is only one API
-key, and Autropy will not send an Anthropic key to OpenAI. Entries it refuses — wrong provider, or a
-display name like `Claude Opus 5` instead of `claude-opus-5` — are named in the log at startup with
-the reason.
+Only your Model ID's own provider is ever contacted, and only models from that provider are offered.
+There is one API key, and Autropy will not send an Anthropic key to OpenAI — the fetched list is
+filtered by the same rule as anything you could have typed. Entries it refuses — wrong provider, or
+a display name like `Claude Opus 5` instead of `claude-opus-5` — are named in the log with the
+reason. If the list cannot be fetched at all (offline, or a key without permission to read it), the
+picker simply offers your configured model, as before.
 
 ### When the model says nothing
 
@@ -292,20 +311,35 @@ To write your own prompt, paste it into the Custom Prompt field in plugin settin
 
 ## Provenance and auditability
 
-Every note written by AUTROPY ends with a machine-readable provenance line:
+Every note written by AUTROPY carries provenance twice: a header you read before the prose, and a
+machine-readable footer.
 
 ```
+📚 Machine-generated item summary — describes all pages of this item
+Generated 2026-09-13 16:02 by claude-opus-5
+Based on 8 page summaries, as you reviewed them.
+
+<the summary>
+
 ---
-[AUTROPY] model: claude-sonnet-5 | 2026-09-10T10:32:00Z | v0.1.0-alpha.3
+[AUTROPY] model: claude-opus-5 | 2026-09-13T19:02:11Z | v0.5.0-alpha.1 | run mu05syns-2
 ```
 
-This allows you to:
-- Distinguish AI-generated notes from human-written ones at a glance
-- Know exactly which model version produced a given analysis
-- Audit machine contributions to your project chronologically
-- Filter or search for AUTROPY notes programmatically using the `[AUTROPY]` marker
+A page note looks the same with `📄 Machine-generated page summary`, and says what that reading was
+built from — whether a transcription was available, and whether preceding pages were in view.
 
-The provenance line is appended regardless of whether you edit the summary before applying — it records what the model produced and when, not what you accepted.
+The header exists because provenance a reader meets *after* the prose has already been read as fact
+arrived too late. The two glyphs exist so an item summary is distinguishable from the page notes it
+sits beside.
+
+The footer stays because it is machine-readable. It lets you:
+- Filter or search for AUTROPY notes programmatically using the `[AUTROPY]` marker
+- Know exactly which model produced a given analysis, and which plugin version
+- Find a write whose outcome was **unknown**, by its run id — the one case AUTROPY will not resolve
+  for you
+
+Both are written regardless of whether you edited the summary before applying: they record what the
+model produced and when, not what you accepted.
 
 ---
 

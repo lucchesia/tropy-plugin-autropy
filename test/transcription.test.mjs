@@ -190,8 +190,8 @@ test('the prompt is built per photo, because transcriptions are', () => {
   // page of a six-page item page one's transcription.
   const source = readFileSync(PLUGIN_SOURCE, 'utf8')
 
-  assert.match(source, /const promptFor = id => buildPrompt\(/)
-  assert.match(source, /prompt: promptFor\(id\)/)
+  assert.match(source, /const promptFor = \(id, context\) => buildPrompt\(/)
+  assert.match(source, /const text = promptFor\(id, context\)/)
   assert.doesNotMatch(source, /const finalPrompt = buildPrompt\(/)
 })
 
