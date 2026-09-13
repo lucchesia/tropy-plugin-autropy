@@ -66,6 +66,36 @@ function requireSupportedMediaType (mediaType) {
     `Supported formats: ${SUPPORTED_MEDIA_TYPES.join(', ')}.`)
 }
 
+// Provider errors, said in a sentence.
+//
+// The raw body is a JSON blob in a modal dialog, which is how a typo in the
+// Model ID ("gemini-2.5-flahs") arrives as forty lines of NOT_FOUND. The body is
+// still appended, because a message that hides the provider's own words is
+// worse than an ugly one — it just no longer comes first.
+async function providerError (provider, res) {
+  const body = await res.text()
+
+  let detail = ''
+  try {
+    detail = JSON.parse(body)?.error?.message || ''
+  } catch {
+    detail = ''
+  }
+
+  const lead = res.status === 404 || /not found|does not exist|unknown model/i.test(detail)
+    ? 'the Model ID was not recognized by ' + provider +
+      '. Check its spelling in Tropy > Preferences > Plugins > Autropy.'
+    : res.status === 401 || res.status === 403
+      ? 'the API key was refused by ' + provider +
+        '. Check it in Tropy > Preferences > Plugins > Autropy.'
+      : res.status === 429
+        ? provider + ' is rate-limiting this key. Wait a moment and try again.'
+        : `${provider} returned an error (HTTP ${res.status}).`
+
+  return new Error(
+    `[AUTROPY] ${lead}${detail ? `\n\n${provider} said: ${detail}` : ''}`)
+}
+
 // ---------------------------------------------------------------------------
 // Provider routing
 // ---------------------------------------------------------------------------
@@ -89,126 +119,27 @@ export function providerFor (model) {
   return null
 }
 
-// The models this key can actually reach.
+// A model ID that is not an API identifier is worth catching before the request.
 //
-// Hardcoding a list of "latest" model IDs guarantees it is wrong within months
-// and fails as a 404 the researcher has already waited for. Every provider
-// publishes what a key can use; asking is both current and honest — the picker
-// offers what this account has, not what the plugin was built believing.
-//
-// Only the provider the configured model routes to is ever contacted. There is
-// one apiKey; asking OpenAI for its catalogue with an Anthropic key would send
-// that credential to a host the researcher never gave it to.
-//
-// Unbilled, and failure is not an error: an unreachable list leaves the picker
-// with the configured model alone, which is exactly where it was before.
-export async function listModels ({ model, apiKey, signal, baseUrl } = {}) {
-  const provider = providerFor(model)
-  if (!provider || !apiKey) return []
+// "Claude Opus 5" routes to Anthropic on its prefix but is a display name — the
+// exact mistake that broke this plugin once before. Reported at load, not as a
+// failed request the researcher has already waited for.
+export function describeModelProblem (model) {
+  const name = String(model || '').trim()
+  if (!name) return 'no Model ID is set in Preferences'
 
-  try {
-    if (provider === 'anthropic') {
-      const res = await fetch('https://api.anthropic.com/v1/models?limit=100', {
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-        signal
-      })
-      if (!res.ok) return []
-      const body = await res.json()
-      return (body?.data ?? []).map(m => m.id).filter(Boolean)
-    }
-
-    if (provider === 'openai') {
-      const root = baseUrl || 'https://api.openai.com/v1'
-      const res = await fetch(`${root}/models`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal
-      })
-      if (!res.ok) return []
-      const body = await res.json()
-      return (body?.data ?? []).map(m => m.id).filter(Boolean)
-    }
-
-    if (provider === 'gemini') {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=200`,
-        { signal })
-      if (!res.ok) return []
-      const body = await res.json()
-      return (body?.models ?? [])
-        // Only what can answer a generateContent call; the list also carries
-        // embedding and tuning-only models, which would fail at call time.
-        .filter(m => (m.supportedGenerationMethods ?? []).includes('generateContent'))
-        .map(m => String(m.name || '').replace(/^models\//, ''))
-        .filter(Boolean)
-    }
-  } catch {
-    // Offline, rate-limited, a key without list permission: none of these are
-    // reasons to stop the researcher analyzing anything.
-    return []
+  const provider = providerFor(name)
+  if (provider == null) {
+    return `"${name}" is not a recognized hosted model ID — ` +
+      'Autropy routes claude-*, gemini-* and gpt-*/o1/o3/o4 IDs'
   }
 
-  return []
-}
-
-// Builds the list the panel's model picker offers.
-//
-// The configured Model ID is always first and always included — it is what the
-// researcher set, and refusing it here would leave the plugin with no model at
-// all. Everything else must route to the same provider, because they share one
-// key. Rejections are returned rather than thrown: one bad entry in a list of
-// four should not stop the other three working, but it must be said out loud.
-export function resolveModelChoices (primary, extra) {
-  const models = []
-  const rejected = []
-
-  const first = String(primary || '').trim()
-  if (!first) return { models, rejected }
-
-  const provider = providerFor(first)
-  models.push(first)
-
-  const seen = new Set([first.toLowerCase()])
-
-  for (const raw of String(extra || '').split(',')) {
-    const model = raw.trim()
-    if (!model || seen.has(model.toLowerCase())) continue
-    seen.add(model.toLowerCase())
-
-    const other = providerFor(model)
-
-    if (other == null) {
-      rejected.push({
-        model,
-        reason: 'not a recognized hosted model ID'
-      })
-      continue
-    }
-
-    // "Claude Opus 5" routes to Anthropic on its prefix but is a display name,
-    // not an API identifier — the exact mistake that broke the plugin once
-    // before. Catching it here means it is reported at load rather than as a
-    // failed request the researcher has already waited for.
-    if (!hasValidModelFormat(model, other)) {
-      rejected.push({
-        model,
-        reason: 'it looks like a display name rather than an API identifier'
-      })
-      continue
-    }
-
-    if (provider != null && other !== provider) {
-      rejected.push({
-        model,
-        reason: `it is a ${other} model, and Autropy has only one API key — ` +
-          `the one for ${provider}`
-      })
-      continue
-    }
-
-    models.push(model)
+  if (!hasValidModelFormat(name, provider)) {
+    return `"${name}" looks like a display name rather than an API identifier ` +
+      '(for example claude-opus-5, not "Claude Opus 5")'
   }
 
-  return { models, rejected }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +212,7 @@ async function callGemini (prompt, model, apiKey, { image, signal }) {
   })
 
   if (!res.ok) {
-    throw new Error(`[AUTROPY] Gemini API error ${res.status}: ${await res.text()}`)
+    throw await providerError('Gemini', res)
   }
 
   const data = await res.json()
@@ -339,7 +270,7 @@ async function callOpenAI (prompt, model, apiKey, { image, signal, baseUrl }) {
   })
 
   if (!res.ok) {
-    throw new Error(`[AUTROPY] OpenAI API error ${res.status}: ${await res.text()}`)
+    throw await providerError('OpenAI', res)
   }
 
   const data = await res.json()
@@ -393,7 +324,7 @@ async function callAnthropic (prompt, model, apiKey, { image, signal }) {
   })
 
   if (!res.ok) {
-    throw new Error(`[AUTROPY] Anthropic API error ${res.status}: ${await res.text()}`)
+    throw await providerError('Anthropic', res)
   }
 
   const data = await res.json()

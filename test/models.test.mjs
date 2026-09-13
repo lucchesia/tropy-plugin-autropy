@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { analyze, listModels, providerFor, resolveModelChoices } from '../src/api.js'
+import { analyze, describeModelProblem, providerFor } from '../src/api.js'
 import {
   ABSENT,
   DECLINED,
@@ -30,44 +30,24 @@ test('provider is derived from the model id', () => {
   assert.equal(providerFor(undefined), null)
 })
 
-// ── the offered list ───────────────────────────────────────────────────────
+// ── a Model ID that cannot work ────────────────────────────────────────────
+//
+// The picker is gone: the model comes from Preferences, where the researcher
+// also puts the one API key it must match. Offering a list of models in the
+// panel invited picking one whose provider had never been given a key.
 
-test('the configured model is always offered, and comes first', () => {
-  const { models } = resolveModelChoices('claude-sonnet-5', 'claude-opus-5')
-
-  assert.deepEqual(models, ['claude-sonnet-5', 'claude-opus-5'])
+test('a display name is caught at load, not as a failed request', () => {
+  // "Claude Opus 5" routes to Anthropic on its prefix but is not an API
+  // identifier — the exact mistake that broke this plugin once before.
+  assert.match(describeModelProblem('Claude Opus 5'), /display name/)
+  assert.match(describeModelProblem('llama3'), /not a recognized hosted model ID/)
+  assert.match(describeModelProblem(''), /no Model ID is set/)
 })
 
-test('a model from another provider is refused, because there is one API key', () => {
-  // The failure this prevents: the Anthropic key going to api.openai.com as a
-  // bearer token, because the researcher listed a model they also use elsewhere.
-  const { models, rejected } = resolveModelChoices(
-    'claude-sonnet-5', 'gpt-4o, gemini-2.5-flash, claude-haiku-4-5')
-
-  assert.deepEqual(models, ['claude-sonnet-5', 'claude-haiku-4-5'])
-  assert.deepEqual(rejected.map(r => r.model), ['gpt-4o', 'gemini-2.5-flash'])
-  assert.match(rejected[0].reason, /only one API key/)
-  assert.match(rejected[0].reason, /anthropic/)
-})
-
-test('one bad entry does not discard the good ones', () => {
-  const { models, rejected } = resolveModelChoices(
-    'claude-sonnet-5', 'Claude Opus 5, claude-opus-5')
-
-  assert.deepEqual(models, ['claude-sonnet-5', 'claude-opus-5'])
-  assert.equal(rejected.length, 1)
-  assert.match(rejected[0].reason, /display name/)
-})
-
-test('duplicates and blanks are dropped, case-insensitively', () => {
-  const { models } = resolveModelChoices(
-    'claude-sonnet-5', ' , claude-sonnet-5 ,CLAUDE-SONNET-5, claude-opus-5,')
-
-  assert.deepEqual(models, ['claude-sonnet-5', 'claude-opus-5'])
-})
-
-test('no configured model means nothing is offered', () => {
-  assert.deepEqual(resolveModelChoices('', 'claude-opus-5').models, [])
+test('a usable model id reports no problem', () => {
+  assert.equal(describeModelProblem('claude-opus-5'), null)
+  assert.equal(describeModelProblem('gemini-2.5-flash'), null)
+  assert.equal(describeModelProblem('gpt-4o'), null)
 })
 
 // ── analyze() ──────────────────────────────────────────────────────────────
@@ -258,119 +238,17 @@ test('a suppressed row offers no Accept button', () => {
   assert.doesNotMatch(row[0], /button/)
 })
 
-// ── the picker ─────────────────────────────────────────────────────────────
+test('a panel with one model shows no picker — the model lives in Preferences', () => {
+  // Offering a list in the panel invited picking a model whose provider had
+  // never been given an API key, and there is only ever one key.
+  const run = createRun({
+    projectPath: '/p.tropy', itemId: 1, model: 'claude-opus-5', photoIds: [10]
+  })
+  setResult(run, 10, { result: { summary: 's', possible_tags: [] } })
 
-test('one model means no picker', () => {
-  const html = panelFor({}, {}, [{ model: 'claude-opus-5', cached: true }])
-
-  assert.doesNotMatch(html, /id="autropy-model"/)
-})
-
-test('the picker marks which models have already been run', () => {
-  const html = panelFor({}, {}, [
-    { model: 'claude-opus-5', cached: true },
-    { model: 'claude-sonnet-5', cached: true },
-    { model: 'claude-haiku-4-5', cached: false }
-  ])
-
-  assert.match(html, /id="autropy-model"/)
-  assert.match(html, /<option value="claude-opus-5" selected>claude-opus-5<\/option>/)
-  assert.match(html, /claude-sonnet-5 · already run/)
-  assert.doesNotMatch(html, /claude-haiku-4-5 · already run/)
-})
-
-// ── asking the provider what this key can reach ────────────────────────────
-
-function listStub (handler) {
-  const calls = []
-  const real = globalThis.fetch
-
-  globalThis.fetch = async (url, init) => {
-    calls.push({ url: String(url), init })
-    return handler(String(url), init)
-  }
-
-  return { calls, restore: () => { globalThis.fetch = real } }
-}
-
-const listOk = body => ({ ok: true, json: async () => body })
-
-//
-// Hardcoding "the latest models" guarantees the list is wrong within months and
-// fails as a 404 the researcher has already waited for. Asking is current — and
-// it must ask only the one provider the key belongs to.
-
-test('an Anthropic key is never used to ask another provider for its catalogue', async () => {
-  // The whole point of the same-provider rule: one apiKey, so a stray request
-  // to another host is a credential leak, not a failed feature.
-  const f = listStub(url => {
-    assert.match(url, /^https:\/\/api\.anthropic\.com\//, `contacted ${url}`)
-    return listOk({ data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }] })
+  const html = buildPanelHTML({
+    run, photoId: 10, existingTagNames: [], suggestMetadata: true
   })
 
-  try {
-    const models = await listModels({ model: 'claude-opus-5', apiKey: 'sk-test' })
-
-    assert.deepEqual(models, ['claude-opus-5', 'claude-sonnet-5'])
-    assert.equal(f.calls.length, 1)
-    assert.equal(f.calls[0].init.headers['x-api-key'], 'sk-test')
-    assert.ok(!('Authorization' in f.calls[0].init.headers))
-  } finally {
-    f.restore()
-  }
-})
-
-test('an unrecognized model id asks nobody', async () => {
-  const f = listStub(() => { throw new Error('should not be called') })
-
-  try {
-    assert.deepEqual(await listModels({ model: 'llama3', apiKey: 'k' }), [])
-    assert.deepEqual(await listModels({ model: 'claude-opus-5', apiKey: '' }), [])
-    assert.equal(f.calls.length, 0)
-  } finally {
-    f.restore()
-  }
-})
-
-test('Gemini offers only models that can answer a generateContent call', async () => {
-  const f = listStub(() => listOk({
-    models: [
-      { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
-      { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] }
-    ]
-  }))
-
-  try {
-    assert.deepEqual(
-      await listModels({ model: 'gemini-2.5-flash', apiKey: 'k' }),
-      ['gemini-2.5-flash'])
-  } finally {
-    f.restore()
-  }
-})
-
-test('an unreachable list is not an error — it leaves the picker as it was', async () => {
-  const bad = listStub(() => ({ ok: false, json: async () => ({}) }))
-  try {
-    assert.deepEqual(await listModels({ model: 'claude-opus-5', apiKey: 'k' }), [])
-  } finally {
-    bad.restore()
-  }
-
-  const offline = listStub(() => { throw new Error('ENOTFOUND') })
-  try {
-    assert.deepEqual(await listModels({ model: 'claude-opus-5', apiKey: 'k' }), [])
-  } finally {
-    offline.restore()
-  }
-})
-
-test('a fetched list is still filtered by the same-provider rule', async () => {
-  // Defence in depth: the boundary holds wherever the list came from. A
-  // provider returning something odd must not widen what the key can reach.
-  const { models, rejected } = resolveModelChoices(
-    'claude-opus-5', 'claude-sonnet-5,gpt-4o,Claude Opus 5')
-
-  assert.deepEqual(models, ['claude-opus-5', 'claude-sonnet-5'])
-  assert.equal(rejected.length, 2)
+  assert.doesNotMatch(html, /id="autropy-model"/)
 })

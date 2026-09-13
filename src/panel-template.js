@@ -230,13 +230,33 @@ function renderMetadataTable (run, photoId, suggestMetadata) {
 // even in a CSS comment. One ends the literal early and breaks the module.
 export const PANEL_STYLES = `
 <style id="autropy-styles">
+  /* Progress that does not depend on the item view being open. Fixed to the
+   * window rather than to Tropy's image container, because File > Export >
+   * Autropy is invoked from the project view, where that container does not
+   * exist. */
+  #autropy-badge {
+    position: fixed;
+    bottom: 14px;
+    right: 14px;
+    z-index: 60;
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: 1px solid rgb(210,210,210);
+    background: rgb(246,246,246);
+    color: rgb(34,34,34);
+    font-family: system-ui;
+    font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    pointer-events: none;
+  }
+
   #autropy-panel {
     /* CONFIRMED (dom_injection_test_results.md): absolute overlay at bottom of .esper-container */
     position: absolute;
     bottom: 0;
     left: 0;
     right: 0;
-    max-height: 60%;   /* prevents panel from eclipsing the image */
+    max-height: 75%;   /* prevents panel from eclipsing the image */
     max-width: 100%;
     /* Clip horizontally, never spill. Without this, one long AI-written
      * metadata value widened the panel's content box, overflowed the image
@@ -358,6 +378,11 @@ export const PANEL_STYLES = `
     font-size: 13px;                    /* CONFIRMED from DevTools */
     resize: vertical;
     box-sizing: border-box;
+    /* Without this the resize handle appears and does nothing. The panel is a
+     * column flex container at its max height, so a flex item that grows is
+     * shrunk back to fit in the same frame. Opting out of shrinking is what
+     * makes the drag stick; the panel scrolls instead, which is the intent. */
+    flex: 0 0 auto;
   }
 
   /* A run that has been applied is history, not a form. The readonly textarea
@@ -563,7 +588,7 @@ export const PANEL_STYLES = `
     background: rgb(246,246,246);       /* CONFIRMED from DevTools */
   }
 
-  /* Pushes the buttons right while leaving the model picker on the left. */
+  /* Pushes the buttons right. */
   .autropy-actions__spacer {
     flex: 1 1 auto;
   }
@@ -651,6 +676,12 @@ export const PANEL_STYLES = `
     #autropy-panel {
       background: rgb(38,38,38);
       border-top-color: rgb(60,60,60);
+      color: rgb(204,204,204);
+    }
+
+    #autropy-badge {
+      background: rgb(38,38,38);
+      border-color: rgb(60,60,60);
       color: rgb(204,204,204);
     }
 
@@ -902,7 +933,7 @@ function renderSynthesis (run, existingTagNames) {
       <textarea
         id="autropy-summary"
         class="autropy-summary"
-        rows="6"${locked || stale ? ' readonly' : ''}
+        rows="10"${locked || stale ? ' readonly' : ''}
       >${escapeHtml(s.summaryDraft || '')}</textarea>
 
       ${destination}
@@ -1019,7 +1050,7 @@ function renderAppliedBanner (run) {
 // Results have already passed validateResult(), so possible_tags is an array and
 // confidence is either a number in 0–1 or null.
 export function buildPanelHTML ({
-  run, photoId, existingTagNames, suggestMetadata, modelChoices = []
+  run, photoId, existingTagNames, suggestMetadata
 }) {
   const locked = isLocked(run)
 
@@ -1080,20 +1111,6 @@ export function buildPanelHTML ({
         <button class="autropy-btn" id="autropy-reanalyze">Re-analyze</button>
         <button class="autropy-btn autropy-btn--primary" id="autropy-apply">Apply accepted</button>`
 
-  // Offered only when there is more than one model to choose between, so the
-  // ordinary single-model panel is unchanged.
-  //
-  // Switching to a model already run on this photo costs nothing and bills
-  // nothing — the picker doubles as a way to compare two readings of the same
-  // document side by side, which is why cached entries say so.
-  const picker = (modelChoices?.length > 1)
-    ? `<select id="autropy-model" class="autropy-model" title="Analyze with a different model">${
-      modelChoices.map(({ model, cached }) => `<option value="${escapeAttr(model)}"${
-        model === run.model ? ' selected' : ''}>${escapeHtml(model)}${
-        cached && model !== run.model ? ' · already run' : ''}</option>`).join('')
-    }</select>`
-    : ''
-
   return `
     ${PANEL_STYLES}
     <div id="autropy-panel" data-locked="${locked ? 'true' : 'false'}" data-run="${
@@ -1104,6 +1121,11 @@ export function buildPanelHTML ({
       </div>
       ${renderPager(run, photoId)}
       ${renderAppliedBanner(run)}
+      ${isMultiPhoto(run)
+        ? ''
+        : `<p class="autropy-note">This item has one page, so this summary is the
+           item's summary: it is written as the item description and as the
+           item's note.</p>`}
 
       <textarea
         id="autropy-summary"
@@ -1118,7 +1140,6 @@ export function buildPanelHTML ({
       <div class="autropy-status" id="autropy-status"></div>
 
       <div class="autropy-actions">
-        ${picker}
         <span class="autropy-actions__spacer"></span>
         <button class="autropy-btn" id="autropy-stop" hidden>Stop</button>
         ${actions}

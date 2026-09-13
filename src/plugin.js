@@ -21,7 +21,7 @@ import { readFile } from 'node:fs/promises'
 // in four places and had already drifted (the installed build said alpha.1
 // while the repo said alpha.2), which corrupts note provenance.
 import { version as AUTROPY_VERSION } from '../package.json'
-import { analyze, listModels, resolveModelChoices } from './api.js'
+import { analyze, describeModelProblem } from './api.js'
 import {
   isItemMode,
   isProjectMode,
@@ -53,6 +53,7 @@ import {
   digest,
   imageFingerprint,
   isLocked,
+  isMultiPhoto,
   ledgerState,
   metadataOp,
   noteOp,
@@ -158,7 +159,6 @@ class AutropyPlugin {
   #gateway = null
   #activeRun = null            // { id, controller, itemId, photoId } while analyzing
   #runCounter = 0
-  #offeredModels = []          // what this key can reach, asked once at load
 
   // ── Tropy state access ───────────────────────────────────────────────────
 
@@ -280,33 +280,6 @@ class AutropyPlugin {
 
   // The models the panel may offer. Rejections are reported once, at load, so a
   // typo or a cross-provider entry is visible without waiting for a run.
-  // The picker's contents. The configured Model ID is always first and always
-  // present; the rest is whatever this key can reach.
-  //
-  // The fetched list still goes through resolveModelChoices, which drops
-  // anything routing to another provider. That is not redundant: there is one
-  // apiKey, and the boundary must hold wherever the list came from.
-  #models () {
-    const { models, rejected } =
-      resolveModelChoices(this.options.model, this.#offeredModels.join(','))
-
-    for (const { model, reason } of rejected) {
-      this.context.logger.warn(`[AUTROPY] not offering "${model}": ${reason}`)
-    }
-
-    return models
-  }
-
-  // Marks which of them have already been run on this item, so the picker can
-  // say which switches are free.
-  #modelChoices (run) {
-    return this.#models().map(model => ({
-      model,
-      cached: this.#runs.has(
-        runCacheKey({ projectPath: run.projectPath, itemId: run.itemId, model }))
-    }))
-  }
-
   #gatewayFor (projectPath, port) {
     if (this.#gateway?.projectPath === projectPath && this.#gateway?.port === port) {
       return this.#gateway
@@ -423,6 +396,16 @@ class AutropyPlugin {
 
     logger.warn(
       `[AUTROPY] starting analysis — run ${run.id}, item ${itemId}, photo ${photoId}`)
+
+    // Opened now rather than when the first page comes back. Invoked from the
+    // project view, Autropy used to leave the researcher on a grid with no sign
+    // anything was happening until a panel appeared minutes later — and no way
+    // to tell a slow run from one that had silently failed.
+    this.#enterItemMode()
+    this.#setBusyBadge(
+      siblings.length > 1
+        ? `Autropy — analyzing ${siblings.length} pages…`
+        : 'Autropy — analyzing…')
 
     try {
       const gateway = this.#gatewayFor(projectPath, port)
@@ -544,6 +527,9 @@ class AutropyPlugin {
 
         entry.status = 'running'
         this.#updateProgress(run)
+        this.#setBusyBadge(photoIds.length > 1
+          ? `Autropy — analyzing page ${page} of ${siblings.length}…`
+          : 'Autropy — analyzing…')
 
         try {
           // Rebuilt here rather than taken from the plan: a page that missed
@@ -629,6 +615,7 @@ class AutropyPlugin {
       // panel opens on. Behind a second button it was too easy to review the
       // pages, apply, and never notice the item summary was not written.
       if (canSynthesize(run)) {
+        this.#setBusyBadge('Autropy — writing the item summary…')
         await this.#synthesize(run, { controller, runId })
       }
 
@@ -656,7 +643,10 @@ class AutropyPlugin {
       this.#fatal('Autropy could not analyze this photo', err.message)
     } finally {
       if (this.#activeRun?.id === runId) this.#activeRun = null
-      if (!this.#activeRun) this.#setToolbarBusy(false)
+      if (!this.#activeRun) {
+        this.#setToolbarBusy(false)
+        this.#setBusyBadge(null)
+      }
       this.#updateProgress(run)
     }
   }
@@ -817,6 +807,7 @@ class AutropyPlugin {
         projectPath: run.projectPath
       }
       this.#setToolbarBusy(true)
+      this.#setBusyBadge('Autropy — writing the item summary…')
     }
 
     logger.warn(
@@ -874,7 +865,10 @@ class AutropyPlugin {
     } finally {
       if (owned) {
         if (this.#activeRun?.id === runId) this.#activeRun = null
-        if (!this.#activeRun) this.#setToolbarBusy(false)
+        if (!this.#activeRun) {
+          this.#setToolbarBusy(false)
+          this.#setBusyBadge(null)
+        }
       }
     }
   }
@@ -940,6 +934,28 @@ class AutropyPlugin {
   // only thing on screen is an unchanged toolbar. Anita clicked the icon five
   // times in five seconds waiting for it — every one of them correctly refused,
   // and none of them visibly acknowledged.
+  // Progress where the researcher actually is.
+  //
+  // The toolbar icon only exists in the item view, and File > Export > Autropy
+  // is invoked from the PROJECT view — so the entire multi-page run reported
+  // itself into a tooltip on a button that was not on screen. This is a fixed
+  // overlay on document.body, which both views have.
+  #setBusyBadge (text) {
+    let el = document.getElementById('autropy-badge')
+
+    if (!text) {
+      el?.remove()
+      return
+    }
+
+    if (!el) {
+      el = document.createElement('div')
+      el.id = 'autropy-badge'
+      document.body.appendChild(el)
+    }
+
+    el.textContent = text
+  }
   #setToolbarBusy (busy) {
     const btn = document.getElementById('autropy-toggle')
     if (!btn) return
@@ -1091,8 +1107,7 @@ class AutropyPlugin {
       run,
       photoId,
       existingTagNames: run.existingTagNames || [],
-      suggestMetadata: run.suggestMetadata ?? this.options.suggestMetadata,
-      modelChoices: this.#modelChoices(run)
+      suggestMetadata: run.suggestMetadata ?? this.options.suggestMetadata
     })
 
     const panel = wrapper.querySelector('#autropy-panel')
@@ -1224,30 +1239,10 @@ class AutropyPlugin {
     })
 
     panel.querySelector('#autropy-reanalyze')?.addEventListener('click', () => {
-      const model = panel.querySelector('#autropy-model')?.value || run.model
-      this.#runAnalysis({ force: true, model }).catch(err => {
+      this.#runAnalysis({ force: true, model: run.model }).catch(err => {
         this.context.logger.error(
           { stack: err.stack }, `[AUTROPY] re-analysis failed: ${err.message}`)
       })
-    })
-
-    // Switching to a model already run on this item replays it for nothing;
-    // switching to an unrun one costs a call, so it is not done on selection —
-    // Re-analyze is the button that spends money, and it uses what is selected.
-    panel.querySelector('#autropy-model')?.addEventListener('change', e => {
-      const model = e.target.value
-      if (model === run.model) return
-
-      const key = runCacheKey({
-        projectPath: run.projectPath, itemId: run.itemId, model
-      })
-      const other = this.#runs.get(key)
-
-      if (other && photoEntry(other, photoId)?.status === 'done') {
-        this.context.logger.warn(
-          `[AUTROPY] switching to run ${other.id} (${model}) — no new request`)
-        this.#openPanel(other, photoId)
-      }
     })
 
     panel.querySelector('#autropy-dismiss')?.addEventListener('click', () => {
@@ -1260,6 +1255,7 @@ class AutropyPlugin {
       this.#activeRun.controller.abort()
       this.#activeRun = null
       this.#setToolbarBusy(false)
+      this.#setBusyBadge(null)
     })
 
     // The item summary is view 0 and the pages follow it, so paging forward
@@ -1610,10 +1606,18 @@ class AutropyPlugin {
     // has already been read as fact is provenance that arrived too late — and
     // the distinct glyph is what makes an item summary recognizable at a glance
     // among the page notes it sits beside.
-    const glyph = synthesis ? '&#128218;' : '&#128196;'
-    const kind = synthesis
-      ? 'Machine-generated item summary — describes all pages of this item'
-      : 'Machine-generated page summary'
+    // A one-page item has no separate synthesis, because there is nothing to
+    // synthesize: that page IS the item, so its summary is the item's summary
+    // and is labelled as one. Claiming otherwise would make the researcher look
+    // for an item summary that could never exist.
+    const asItem = synthesis || !isMultiPhoto(run)
+
+    const glyph = asItem ? '&#128218;' : '&#128196;'
+    const kind = !asItem
+      ? 'Machine-generated page summary'
+      : synthesis
+        ? 'Machine-generated item summary — describes all pages of this item'
+        : 'Machine-generated item summary — this item has one page'
 
     const entry = photoId == null ? null : photoEntry(run, photoId)
 
@@ -1719,19 +1723,10 @@ class AutropyPlugin {
 
     this.#injectStyles()
 
-    // Ask the provider what this key can actually reach, so the picker offers
-    // current model IDs instead of a list baked into the plugin that goes stale
-    // within months. Not awaited and never fatal: the picker falls back to the
-    // configured model alone, which is where it was before.
-    listModels({ model: this.options.model, apiKey: this.options.apiKey })
-      .then(models => {
-        this.#offeredModels = models
-        if (models.length > 0) {
-          this.context.logger.warn(
-            `[AUTROPY] ${this.#models().length} model(s) offered in the picker`)
-        }
-      })
-      .catch(() => {})
+    // A Model ID that cannot work is worth saying at load rather than as a
+    // failed request the researcher has already paid for in waiting.
+    const modelProblem = describeModelProblem(this.options.model)
+    if (modelProblem) this.context.logger.warn(`[AUTROPY] ${modelProblem}`)
 
     // load() runs before Tropy renders the toolbar, and the esper tool group
     // only exists once an item with a photo is selected — which may be much

@@ -61,6 +61,12 @@ reviewing.
 **Stop** appears while a run is in flight. It keeps every page already analyzed and makes no further
 requests.
 
+While a run is going, a small badge in the bottom-right corner of the Tropy window says what is
+happening — `Autropy — analyzing page 3 of 8…`. It is there because **File > Export > Autropy** is
+invoked from the *project* view, where the toolbar icon does not exist: the whole run used to report
+itself into the tooltip of a button that was not on screen. Autropy also switches Tropy to the item
+view the moment a run starts, so there is something to watch.
+
 A page that fails does not end the run: it is marked failed in the pager, the others continue, and
 the panel says how many did not work. Failed and unreached pages write nothing.
 
@@ -90,7 +96,12 @@ Single-photo items are unaffected and still suggest metadata as before.
 **Item summary** is one description of the item as a whole, written from the page summaries. On a
 multi-page item it is written in the same pass, is the **first view in the pager** — position 0,
 before page 1 — and is what the panel opens on. The pages follow it, so you read from the whole to
-its parts. It is a text-only request — it reads the page descriptions, not the images again — and
+its parts. It is also the **first note written**, so it sits at the top of the item's notes rather
+than below a description of page one.
+
+**A one-page item has no separate item summary, because there is nothing to synthesize.** That page
+is the item, so its summary is labelled and written as the item's summary, and costs one request
+rather than two. It is a text-only request — it reads the page descriptions, not the images again — and
 the scope dialog counts it before anything is billed.
 
 It is reviewed and written **exactly like a page summary**: edit the text, or empty the box to
@@ -112,26 +123,20 @@ row, with the same `replaces:` warning as anywhere else.
 If some pages could not be analyzed, the model is told so and the summary says how many pages it
 actually covers. If the item summary itself fails, the page summaries are kept and reviewable.
 
-### Comparing models
+### Choosing a model
 
-The review panel has a model picker. Pick a model and press **Re-analyze** to read the same document
-with a different one.
+The model is set in **Tropy > Preferences > Plugins > Autropy > Model ID**, next to the API Key it
+has to match. There is deliberately no picker in the review panel: there is only ever one API key,
+and a list of models in the panel invited choosing one whose provider had never been given a key.
 
-You do not configure the list. At startup Autropy asks your provider which models your API key can
-actually reach and offers those, so the picker is current rather than a list baked into the plugin
-that goes stale within months. Tropy's plugin preferences cannot render a dropdown of arbitrary
-values — the only selects it offers are bound to Tropy's own ontology — so **Model ID** stays a text
-field, and it is what decides which provider is asked.
+Use the exact API identifier, not the display name — `claude-opus-5`, not `Claude Opus 5`. Autropy
+checks the ID at startup and logs what is wrong with it if anything is, rather than letting you find
+out from a failed request you have already waited for. To read the same item with a different model,
+change the ID in Preferences and press **Re-analyze**.
 
-A model you have already run on this item is marked *already run*: switching back to it is instant
-and costs nothing, so you can hold two readings of the same page side by side.
-
-Only your Model ID's own provider is ever contacted, and only models from that provider are offered.
-There is one API key, and Autropy will not send an Anthropic key to OpenAI — the fetched list is
-filtered by the same rule as anything you could have typed. Entries it refuses — wrong provider, or
-a display name like `Claude Opus 5` instead of `claude-opus-5` — are named in the log with the
-reason. If the list cannot be fetched at all (offline, or a key without permission to read it), the
-picker simply offers your configured model, as before.
+Provider errors are reported as sentences. A mistyped ID says the model was not recognized and
+points at Preferences; a refused key says so; a rate limit says so. The provider's own words follow,
+so nothing is hidden — they are just no longer the first thing you see.
 
 ### When the model says nothing
 

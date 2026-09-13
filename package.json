@@ -1,7 +1,7 @@
 {
   "name": "tropy-plugin-autropy",
   "productName": "Autropy",
-  "version": "0.5.0-alpha.1",
+  "version": "0.5.0-alpha.2",
   "description": "Multimodal AI analysis for Tropy: suggests tags and descriptions with researcher review.",
   "author": "Anita Lucchesi",
   "homepage": "https://github.com/lucchesia/tropy-plugin-autropy",
@@ -18,11 +18,11 @@
   "options": [
     {
       "field": "model",
-      "label": "Model ID",
+      "label": "Model ID (e.g. claude-opus-5, gemini-2.5-flash, gpt-4o)",
       "type": "string",
       "default": "",
       "required": true,
-      "hint": "The exact API model identifier, e.g. claude-opus-5, gemini-2.5-flash, gpt-4o. The panel then offers the other models your API key can reach, from the same provider.",
+      "hint": "The exact API model identifier from your provider, not its display name: claude-opus-5, not \"Claude Opus 5\". It must match the provider your API Key belongs to.",
       "placeholder": "claude-opus-5"
     },
     {

@@ -298,7 +298,13 @@ test('the item summary note says it describes the whole item, with its own glyph
 
   assert.match(text, /Machine-generated item summary — describes all pages of this item/)
   assert.match(text, /Machine-generated page summary/)
-  assert.match(text, /synthesis \? '&#128218;' : '&#128196;'/)
+  assert.match(text, /asItem \? '&#128218;' : '&#128196;'/)
+
+  // A one-page item has no separate synthesis because there is nothing to
+  // synthesize — that page IS the item, so its summary is labelled as the
+  // item's rather than sending the researcher looking for one that cannot exist.
+  assert.match(text, /const asItem = synthesis \|\| !isMultiPhoto\(run\)/)
+  assert.match(text, /Machine-generated item summary — this item has one page/)
 })
 
 // ── the item summary has its own lock ──────────────────────────────────────

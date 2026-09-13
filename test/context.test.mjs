@@ -14,7 +14,15 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
 import { CONTEXT_WINDOW, buildContextBlock, buildPrompt } from '../src/prompt.js'
-import { digest } from '../src/run.js'
+import {
+  SYNTHESIS,
+  collectWrites,
+  createRun,
+  digest,
+  setResult,
+  setSynthesis,
+  synthesisKey
+} from '../src/run.js'
 
 const PLUGIN_SOURCE = fileURLToPath(new URL('../src/plugin.js', import.meta.url))
 const source = () => readFileSync(PLUGIN_SOURCE, 'utf8')
@@ -93,7 +101,7 @@ test('the cost dialog states the item summary before it is billed', () => {
 test('the item summary is written in the same pass, and is what the panel opens on', () => {
   const src = source()
 
-  assert.match(src, /if \(canSynthesize\(run\)\) \{\s*\n\s*await this\.#synthesize\(run, \{ controller, runId \}\)/)
+  assert.match(src, /await this\.#synthesize\(run, \{ controller, runId \}\)/)
   assert.match(src, /const landing = run\.synthesis \? SYNTHESIS : done\[0\]\.photoId/)
 })
 
@@ -127,4 +135,61 @@ test('the machine-readable footer survives the new header', () => {
 
   assert.match(src, /\$\{AUTROPY_NOTE_MARKER\} model: \$\{run\.model\}\$\{served\}/)
   assert.match(src, /run \$\{run\.id\}/)
+})
+
+// ── the item summary is the first note on the item ─────────────────────────
+
+test('the item summary is emitted before the page notes', () => {
+  // Notes are created in the order collectWrites returns them and Tropy lists
+  // them in creation order, so emitting it last put the description of the
+  // whole item second, below a description of page one. On a 20-page item it
+  // was note 2 of 21.
+  const run = createRun({
+    projectPath: '/p.tropy', itemId: 1, model: 'claude-opus-5', photoIds: [10, 11]
+  })
+  setResult(run, 10, { result: { summary: 'page one' } })
+  setResult(run, 11, { result: { summary: 'page two' } })
+  setSynthesis(run, {
+    result: { item_summary: 'the whole dossier' },
+    sourceKey: synthesisKey(run)
+  })
+
+  const { notes } = collectWrites(run)
+
+  assert.equal(notes[0].kind, SYNTHESIS, 'first, so it is the item\'s first note')
+  assert.equal(notes[0].text, 'the whole dossier')
+  assert.equal(notes.length, 3)
+})
+
+// ── feedback outside the item view ─────────────────────────────────────────
+
+test('progress is reported somewhere the project view can show it', () => {
+  // The toolbar icon only exists in the item view, and File > Export > Autropy
+  // is invoked from the project view — so a whole multi-page run reported
+  // itself into the tooltip of a button that was not on screen.
+  const src = source()
+
+  assert.match(src, /#setBusyBadge \(text\)/)
+  assert.match(src, /document\.body\.appendChild\(el\)/)
+  assert.match(src, /Autropy — analyzing page \$\{page\} of/)
+})
+
+test('the item view opens when the run starts, not when the first page lands', () => {
+  const src = source()
+  const start = src.indexOf('starting analysis — run')
+  const loop = src.indexOf('for (const id of photoIds)')
+
+  const enter = src.indexOf('this.#enterItemMode()', start)
+
+  assert.ok(enter > start && enter < loop,
+    'a researcher left on the project grid cannot tell a slow run from a failed one')
+})
+
+test('the model picker is gone from the panel', () => {
+  // One API key. A list in the panel invited choosing a model whose provider
+  // had never been given one; Preferences is where both live.
+  const src = source()
+
+  assert.doesNotMatch(src, /autropy-model/)
+  assert.doesNotMatch(src, /listModels/)
 })

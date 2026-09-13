@@ -168,12 +168,31 @@ test('a truncated Gemini response is reported the same way', async () => {
     /token limit/)
 })
 
-test('an API error surfaces the provider status', async () => {
+test('an API error says what went wrong before quoting the provider', async () => {
+  // A raw JSON body in a modal dialog is how a typo in the Model ID arrives as
+  // forty lines of NOT_FOUND. The provider's own words are still there, just no
+  // longer first.
   await assert.rejects(
     () => withFetch(
       () => json({ error: { message: 'bad key' } }, 401),
       () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k')),
-    /Anthropic API error 401/)
+    /the API key was refused by Anthropic.*Anthropic said: bad key/s)
+})
+
+test('a mistyped model id points at Preferences, not at the JSON', async () => {
+  await assert.rejects(
+    () => withFetch(
+      () => json({ error: { message: 'models/gemini-2.5-flahs is not found' } }, 404),
+      () => analyzeImage(IMAGE, PROMPT, 'gemini-2.5-flash', 'k')),
+    /the Model ID was not recognized by Gemini.*Preferences/s)
+})
+
+test('a rate limit is named as one', async () => {
+  await assert.rejects(
+    () => withFetch(
+      () => json({ error: { message: 'slow down' } }, 429),
+      () => analyzeImage(IMAGE, PROMPT, 'gpt-4o', 'k')),
+    /rate-limiting this key/)
 })
 
 // ── cancellation ───────────────────────────────────────────────────────────
