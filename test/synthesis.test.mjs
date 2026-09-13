@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
+import { noteStrings } from '../src/i18n.js'
 import { buildSynthesisPrompt } from '../src/prompt.js'
 import { validateSynthesis } from '../src/result-schema.js'
 import { buildPanelHTML } from '../src/panel-template.js'
@@ -296,15 +297,18 @@ test('the item summary note says it describes the whole item, with its own glyph
   const text = readFileSync(
     fileURLToPath(new URL('../src/plugin.js', import.meta.url)), 'utf8')
 
-  assert.match(text, /Machine-generated item summary — describes all pages of this item/)
-  assert.match(text, /Machine-generated page summary/)
+  assert.match(noteStrings('en').itemMulti,
+    /Machine-generated item summary — describes all pages of this item/)
+  assert.match(noteStrings('en').page, /Machine-generated page summary/)
   assert.match(text, /asItem \? '&#128218;' : '&#128196;'/)
+  assert.match(text, /const kind = !asItem \? t\.page : \(synthesis \? t\.itemMulti : t\.itemSingle\)/)
 
   // A one-page item has no separate synthesis because there is nothing to
   // synthesize — that page IS the item, so its summary is labelled as the
   // item's rather than sending the researcher looking for one that cannot exist.
   assert.match(text, /const asItem = synthesis \|\| !isMultiPhoto\(run\)/)
-  assert.match(text, /Machine-generated item summary — this item has one page/)
+  assert.match(noteStrings('en').itemSingle,
+    /Machine-generated item summary — this item has one page/)
 })
 
 // ── the item summary has its own lock ──────────────────────────────────────

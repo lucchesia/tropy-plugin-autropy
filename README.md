@@ -123,6 +123,19 @@ row, with the same `replaces:` warning as anywhere else.
 If some pages could not be analyzed, the model is told so and the summary says how many pages it
 actually covers. If the item summary itself fails, the page summaries are kept and reviewable.
 
+### Output language
+
+**Output Language** in Preferences tells the model which language to write in; leave it blank for
+English. The provenance header AUTROPY writes on each note follows it too, for Portuguese, Spanish,
+French, Italian and German — an English stamp on a Portuguese summary is a machine announcing it was
+built somewhere else, and it is the first thing a colleague reads.
+
+Those strings are translated in the plugin, never by the model: a provenance claim written by the
+thing whose provenance it records is a suggestion, not a claim. Any other language falls back to an
+English header, because machine-translating it would make the one part of the note that has to be
+exact the one part nobody checked. The panel's own controls stay in English — they are this tool's
+interface, not part of your record.
+
 ### Choosing a model
 
 The model is set in **Tropy > Preferences > Plugins > Autropy > Model ID**, next to the API Key it
@@ -181,11 +194,18 @@ All notes written by AUTROPY carry a machine-readable provenance footer so you c
 
 ## Installation
 
-AUTROPY is currently in active development (v0.1.0-alpha.3) and not yet available as a packaged release. To try it, build from source — see below.
+Download `tropy-plugin-autropy-v0.5.0-beta.1.zip` from the **Releases** page of this repository,
+then in Tropy: **Preferences → Plugins → Install Plugin** → select the zip → **quit Tropy completely
+(Cmd+Q) and relaunch**. Reopening the window is not enough; plugins are constructed at startup.
+
+Then set your **Model ID** and **API Key** in Preferences → Plugins → Autropy. Nothing runs until you
+invoke it.
 
 **Tropy compatibility:** requires **Tropy 1.18.0-beta.5 or later**, or Tropy 1.17.x. See [Tropy compatibility](#tropy-compatibility) for why the version matters.
 
-If you are a Tropy developer or tester evaluating the plugin, please contact the author directly.
+**This is a beta.** It writes to your project, and everything it writes is reviewed by you first —
+but back up your `.tropy` file before trying it on work you care about, and read
+[Limitations](#limitations). Bug reports and disagreements are welcome as issues.
 
 ---
 
@@ -198,13 +218,11 @@ npm install
 npm run build
 ```
 
-To install, package the built plugin and install via Tropy Preferences → Plugins:
+To build the same zip the Releases page serves — bundle, manifest, README and licence, with the test
+suite run first:
 
 ```bash
-cd ..
-zip -r tropy-plugin-autropy.zip tropy-plugin-autropy \
-  --exclude "tropy-plugin-autropy/.git*" \
-  --exclude "tropy-plugin-autropy/node_modules/*"
+npm run package     # writes dist/tropy-plugin-autropy-v<version>.zip
 ```
 
 Then: **Preferences → Plugins → Install Plugin** → select the zip → restart Tropy completely (Cmd+Q).

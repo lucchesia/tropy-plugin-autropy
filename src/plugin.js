@@ -22,6 +22,7 @@ import { readFile } from 'node:fs/promises'
 // while the repo said alpha.2), which corrupts note provenance.
 import { version as AUTROPY_VERSION } from '../package.json'
 import { analyze, describeModelProblem } from './api.js'
+import { noteStrings } from './i18n.js'
 import {
   isItemMode,
   isProjectMode,
@@ -429,6 +430,11 @@ class AutropyPlugin {
       run.existingTagNames = existingTagNames
       run.existingTags = existingTags
       run.suggestMetadata = suggestMetadata
+
+      // Carried on the run, not read from options at write time: the preference
+      // can change between the analysis and the Apply, and a note whose stamp
+      // is in a language the summary is not in would be worse than either.
+      run.outputLanguage = outputLanguage
 
       // Kept so the panel can show which suggestions would REPLACE something.
       // Tropy holds one value per property, so an accepted suggestion for a
@@ -997,8 +1003,24 @@ class AutropyPlugin {
   // remove the injected node while leaving the flag set, which would silently
   // skip re-injection forever.
   #injectToolbarToggle () {
+    // One icon, however many Autropy instances are configured.
+    //
+    // Tropy constructs one plugin object per instance in Preferences, and each
+    // one used to inject its own button — two configured models meant two
+    // identical icons in the image toolbar. The DOM is the shared thing, so it
+    // is what decides, not this instance's own flag.
+    if (document.getElementById('autropy-toggle')) {
+      if (!this.#toolbarInjected) {
+        this.context.logger.warn(
+          '[AUTROPY] another Autropy instance already owns the toolbar icon — ' +
+          `this one (model "${this.options.model || 'not set'}") is reachable ` +
+          'through File > Export instead')
+      }
+      this.#toolbarInjected = true
+      return
+    }
+
     if (this.#toolbarInjected) {
-      if (document.getElementById('autropy-toggle')) return
       this.#toolbarInjected = false
       this.context.logger.warn('[AUTROPY] toolbar toggle was removed from DOM — re-injecting')
     }
@@ -1612,30 +1634,29 @@ class AutropyPlugin {
     // for an item summary that could never exist.
     const asItem = synthesis || !isMultiPhoto(run)
 
+    // In the researcher's working language, not the tool's. An English stamp on
+    // a Portuguese summary is a machine announcing it was built somewhere else,
+    // and it is the part of the note a colleague reads first. The strings are
+    // translated here and never by the model: a provenance claim written by the
+    // thing whose provenance it records is a suggestion, not a claim. An
+    // untranslated language falls back to English rather than to a guess.
+    const t = noteStrings(run.outputLanguage)
+
     const glyph = asItem ? '&#128218;' : '&#128196;'
-    const kind = !asItem
-      ? 'Machine-generated page summary'
-      : synthesis
-        ? 'Machine-generated item summary — describes all pages of this item'
-        : 'Machine-generated item summary — this item has one page'
+    const kind = !asItem ? t.page : (synthesis ? t.itemMulti : t.itemSingle)
 
     const entry = photoId == null ? null : photoEntry(run, photoId)
 
     const basis = synthesis
-      ? `Based on ${synthesisSources(run).length} page summaries.`
+      ? t.fromPages(synthesisSources(run).length)
       : [
-          entry?.hadTranscription
-            ? 'Based on the image and an existing transcription.'
-            : 'Based on the image; no transcription was available.',
-          entry?.contextPages > 0
-            ? `Written with the ${entry.contextPages} preceding page(s) in view, ` +
-              'so it is not an independent reading of this page alone.'
-            : ''
+          entry?.hadTranscription ? t.withTranscription : t.withoutTranscription,
+          entry?.contextPages > 0 ? t.withContext(entry.contextPages) : ''
         ].filter(Boolean).join(' ')
 
     const header =
       `<p><strong>${glyph} ${escapeHtml(kind)}</strong><br>` +
-      `Generated ${escapeHtml(formatLocal(now))} by ${escapeHtml(run.model + served)}<br>` +
+      `${escapeHtml(t.generated(formatLocal(now), run.model + served))}<br>` +
       `${escapeHtml(basis)}</p>`
 
     // The machine-readable line stays. It is what lets a write whose outcome is

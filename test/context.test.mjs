@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
 import { CONTEXT_WINDOW, buildContextBlock, buildPrompt } from '../src/prompt.js'
+import { noteStrings } from '../src/i18n.js'
 import {
   SYNTHESIS,
   collectWrites,
@@ -121,11 +122,13 @@ test('the cache replay stops at the first miss', () => {
 // ── what the note says ─────────────────────────────────────────────────────
 
 test('a page note says what the reading was built from', () => {
+  // The wording lives in the translation table now — see i18n.test.mjs — so
+  // this checks the note actually asks for it.
   const src = source()
 
-  assert.match(src, /Based on the image and an existing transcription/)
-  assert.match(src, /Based on the image; no transcription was available/)
-  assert.match(src, /not an independent reading of this page alone/)
+  assert.match(src, /entry\?\.hadTranscription \? t\.withTranscription : t\.withoutTranscription/)
+  assert.match(src, /entry\?\.contextPages > 0 \? t\.withContext\(entry\.contextPages\)/)
+  assert.match(noteStrings('en').withContext(3), /not an independent reading of this page alone/)
 })
 
 test('the machine-readable footer survives the new header', () => {

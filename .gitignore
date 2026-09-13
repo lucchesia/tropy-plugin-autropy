@@ -3,3 +3,4 @@ index.js
 third-party-licenses.txt
 *.log
 .DS_Store
+dist/
