@@ -1174,11 +1174,18 @@ class AutropyPlugin {
   #showPhoto (run, photoId) {
     const store = this.#store()
 
+    // Leaving the item summary is the one case where the nav watcher will not
+    // re-render for us: it deliberately ignores photo changes while that view
+    // is open (see #watchNav), because the item summary is not about any one
+    // photo. Without this the back arrow moved Tropy's selection and left the
+    // panel showing the item summary.
+    const leavingSynthesis = this.#current?.photoId === SYNTHESIS
+
     if (store && typeof store.dispatch === 'function') {
       // #watchNav sees the change and re-renders; no need to do it twice.
       store.dispatch(photoAction(photoId))
 
-      if (this.#readNav().photoId === photoId) return
+      if (!leavingSynthesis && this.#readNav().photoId === photoId) return
     }
 
     this.#renderPanelInPlace(run, photoId)
