@@ -8,14 +8,18 @@ import { test } from 'node:test'
 
 import { itemPhotoIds, photoAction } from '../src/nav.js'
 import {
+  SYNTHESIS,
   collectWrites,
   createRun,
+  isItemTagAccepted,
+  itemTags,
   isMultiPhoto,
   photoIndex,
   progressLabel,
   setFailed,
   setResult,
-  setSummaryDraft
+  setSummaryDraft,
+  toggleItemTag
 } from '../src/run.js'
 import { buildPanelHTML } from '../src/panel-template.js'
 
@@ -130,15 +134,20 @@ function panel (run, photoId) {
 test('the pager says where you are and is bounded at both ends', () => {
   const run = sixPages()
 
+  // The item summary is view 0 — the whole before its parts — so page 1 can
+  // still go back, and the last page is the end of the sequence.
+  const summary = panel(run, SYNTHESIS)
+  assert.match(summary, /Item summary/)
+  assert.match(summary, /id="autropy-prev" disabled/)
+  assert.doesNotMatch(summary, /id="autropy-next" disabled/)
+
   const first = panel(run, 462)
   assert.match(first, /Page 1 of 6/)
-  assert.match(first, /id="autropy-prev" disabled/)
-  assert.doesNotMatch(first, /id="autropy-next" disabled/)
+  assert.doesNotMatch(first, /id="autropy-prev" disabled/)
 
-  // The last page is NOT the last step: the item summary sits one past it.
   const last = panel(run, 467)
   assert.match(last, /Page 6 of 6/)
-  assert.doesNotMatch(last, /id="autropy-next" disabled/)
+  assert.match(last, /id="autropy-next" disabled/)
 })
 
 test('without enough analyzed pages the last page is the last step', () => {
@@ -246,4 +255,68 @@ test('scope is never assumed when the question cannot be asked', () => {
 
   assert.match(ask, /return 'one'/)
   assert.doesNotMatch(ask.slice(ask.indexOf('catch')), /return 'all'/)
+})
+
+// ── tags belong to the item, not to each page ──────────────────────────────
+//
+// They were always pooled on write — one deduplicated set per item — but were
+// reviewed per page, so the same chip appeared once for every page that
+// suggested it, each with its own accept state that the write then ignored.
+
+test('the item summary shows one pooled tag list, and the pages show none', () => {
+  const run = sixPages()
+  for (const p of run.photos) p.result = { ...p.result, possible_tags: [] }
+  run.photos[0].result.possible_tags = ['vatican', 'dossier']
+  run.photos[1].result.possible_tags = ['dossier', 'refugees']
+
+  assert.deepEqual(itemTags(run), ['vatican', 'dossier', 'refugees'],
+    'de-duplicated, in the order the pages proposed them')
+
+  const summary = panel(run, SYNTHESIS)
+  assert.match(summary, /data-tag="refugees"/)
+
+  // `data-tag`, not the class name: the stylesheet mentions the class on every
+  // view, which is exactly the kind of match that makes a test pass by accident.
+  const page = panel(run, 462)
+  assert.doesNotMatch(page, /data-tag=/,
+    'deciding the same tag six times is not review, it is repetition')
+})
+
+test('one gesture decides a tag everywhere it was suggested', () => {
+  const run = sixPages()
+  for (const p of run.photos) p.result = { ...p.result, possible_tags: [] }
+  run.photos[0].result.possible_tags = ['dossier']
+  run.photos[1].result.possible_tags = ['dossier']
+  for (const p of run.photos) p.accept.tags = []
+
+  toggleItemTag(run, 'dossier')
+
+  assert.equal(isItemTagAccepted(run, 'dossier'), true)
+  assert.deepEqual(collectWrites(run).tags, ['dossier'], 'written once')
+  assert.equal(run.photos[1].accept.tags.length, 1, 'and set on every page that proposed it')
+
+  toggleItemTag(run, 'dossier')
+
+  assert.equal(isItemTagAccepted(run, 'dossier'), false)
+  assert.deepEqual(collectWrites(run).tags, [])
+})
+
+test('a tag is never set on a page that did not suggest it', () => {
+  const run = sixPages()
+  for (const p of run.photos) p.result = { ...p.result, possible_tags: [] }
+  run.photos[0].result.possible_tags = ['vatican']
+  for (const p of run.photos) p.accept.tags = []
+
+  toggleItemTag(run, 'vatican')
+
+  assert.deepEqual(run.photos[1].accept.tags, [])
+})
+
+test('a single-photo item keeps its chips on the photo, having nowhere else', () => {
+  const run = createRun({
+    projectPath: '/p.tropy', itemId: 7, model: 'claude-opus-5', photoIds: [900]
+  })
+  setResult(run, 900, { result: { ...RESULT, possible_tags: ['letter'] } })
+
+  assert.match(panel(run, 900), /data-tag="letter"/)
 })

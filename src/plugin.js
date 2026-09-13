@@ -78,6 +78,8 @@ import {
   tagOp,
   toggleField,
   toggleSynthesisField,
+  isItemTagAccepted,
+  toggleItemTag,
   toggleTag
 } from './run.js'
 
@@ -634,6 +636,10 @@ class AutropyPlugin {
 
       const landing = run.synthesis ? SYNTHESIS : done[0].photoId
 
+      logger.warn(
+        `[AUTROPY] run ${run.id} finished — opening on ` +
+        `${landing === SYNTHESIS ? 'the item summary' : `photo ${landing}`}`)
+
       if (!this.#current || this.#current.run !== run) {
         this.#openPanel(run, done[0].photoId)
         if (landing === SYNTHESIS) this.#renderPanelInPlace(run, SYNTHESIS)
@@ -1152,11 +1158,23 @@ class AutropyPlugin {
     }
 
     if (!locked) {
+      // On a multi-page item the chips are the item's, not this page's: one
+      // gesture sets the tag everywhere it was suggested. A single-photo item
+      // has no item summary view, so its chips stay on the photo.
+      const pooled = canSynthesize(run)
+
       panel.querySelectorAll('.autropy-chip').forEach(chip => {
         chip.addEventListener('click', () => {
-          toggleTag(run, photoId, chip.dataset.tag)
-          chip.dataset.accepted = String(
-            !!photoEntry(run, photoId)?.accept.tags.includes(chip.dataset.tag))
+          const tag = chip.dataset.tag
+
+          if (pooled) {
+            toggleItemTag(run, tag)
+            chip.dataset.accepted = String(isItemTagAccepted(run, tag))
+          } else {
+            toggleTag(run, photoId, tag)
+            chip.dataset.accepted = String(
+              !!photoEntry(run, photoId)?.accept.tags.includes(tag))
+          }
         })
         chip.addEventListener('keydown', e => {
           if (e.key === 'Enter' || e.key === ' ') {
@@ -1244,18 +1262,21 @@ class AutropyPlugin {
       this.#setToolbarBusy(false)
     })
 
-    // The item summary is one step past the last page, so reaching it is the
-    // same gesture as turning to it.
+    // The item summary is view 0 and the pages follow it, so paging forward
+    // moves from the whole to its parts — the order the researcher reads in.
     const step = delta => {
-      const here = photoId === SYNTHESIS ? run.photos.length : photoIndex(run, photoId)
+      const offset = canSynthesize(run) ? 1 : 0
+      const here = photoId === SYNTHESIS ? 0 : photoIndex(run, photoId) + offset
       const i = here + delta
 
-      if (i === run.photos.length && canSynthesize(run)) {
+      if (i < 0) return
+
+      if (i === 0 && offset === 1) {
         this.#renderPanelInPlace(run, SYNTHESIS)
         return
       }
 
-      const next = run.photos[i]
+      const next = run.photos[i - offset]
       if (next) this.#showPhoto(run, next.photoId)
     }
 
@@ -1597,8 +1618,7 @@ class AutropyPlugin {
     const entry = photoId == null ? null : photoEntry(run, photoId)
 
     const basis = synthesis
-      ? `Based on ${synthesisSources(run).length} page summaries, ` +
-        'as you reviewed them.'
+      ? `Based on ${synthesisSources(run).length} page summaries.`
       : [
           entry?.hadTranscription
             ? 'Based on the image and an existing transcription.'

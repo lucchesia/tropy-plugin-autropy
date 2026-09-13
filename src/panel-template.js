@@ -28,7 +28,9 @@ import {
   isSynthesisFieldAccepted,
   isSynthesisLocked,
   isSynthesisStale,
+  isItemTagAccepted,
   isTagAccepted,
+  itemTags,
   photoEntry,
   photoIndex,
   progressLabel,
@@ -780,10 +782,13 @@ function renderPager (run, view) {
   const onSynthesis = view === SYNTHESIS
   const hasSynthesis = canSynthesize(run)
 
-  // The item summary sits after the last page, as one more step, so reaching it
-  // is the same gesture as turning to it.
-  const i = onSynthesis ? total : photoIndex(run, view)
-  const last = hasSynthesis ? total : total - 1
+  // The item summary is the first view, not the last. The page summaries exist
+  // so that it can exist; putting it one step past the final page made it read
+  // as an appendix, and meant the researcher met it only after paging through
+  // everything it was built from.
+  const offset = hasSynthesis ? 1 : 0
+  const i = onSynthesis ? 0 : photoIndex(run, view) + offset
+  const last = total - 1 + offset
 
   const entry = onSynthesis ? null : photoEntry(run, view)
 
@@ -800,7 +805,7 @@ function renderPager (run, view) {
 
   const position = onSynthesis
     ? 'Item summary'
-    : `Page ${i + 1} of ${total}`
+    : `Page ${i + 1 - offset} of ${total}`
 
   return `
       <div class="autropy-pager">
@@ -820,7 +825,32 @@ function renderPager (run, view) {
 // The item summary view
 // ---------------------------------------------------------------------------
 
-function renderSynthesis (run) {
+// The tag chips.
+//
+// On a multi-page item these belong to the item, not to any page: the same tag
+// suggested by four pages was shown four times, each with its own accept state,
+// and the write pooled them anyway. `photoId === null` means the pooled list.
+function renderTagSection (run, photoId, existingTagNames) {
+  const locked = photoId === null ? isSynthesisLocked(run) : isLocked(run)
+
+  const tags = photoId === null
+    ? itemTags(run)
+    : (photoEntry(run, photoId)?.result?.possible_tags ?? [])
+
+  if (tags.length === 0) return ''
+
+  const existingSet = new Set((existingTagNames || []).map(n => n.toLowerCase()))
+
+  const chips = tags.map(tag => renderChip(
+    tag,
+    existingSet.has(tag.toLowerCase()),
+    photoId === null ? isItemTagAccepted(run, tag) : isTagAccepted(run, photoId, tag),
+    locked)).join('')
+
+  return `<div class="autropy-chips" id="autropy-chips">${chips}</div>`
+}
+
+function renderSynthesis (run, existingTagNames) {
   const locked = isSynthesisLocked(run)
   const s = run.synthesis
   const sources = synthesisSources(run)
@@ -1016,7 +1046,8 @@ export function buildPanelHTML ({
   escapeAttr(run.id)}" data-view="synthesis">
       ${renderPager(run, SYNTHESIS)}
       ${renderAppliedBanner(run)}
-      ${renderSynthesis(run)}
+      ${renderSynthesis(run, existingTagNames)}
+      ${renderTagSection(run, null, existingTagNames)}
       <div class="autropy-actions">
         <span class="autropy-actions__spacer"></span>
         <button class="autropy-btn" id="autropy-stop" hidden>Stop</button>
@@ -1029,21 +1060,8 @@ export function buildPanelHTML ({
   const result = entry?.result ?? {}
   const {
     document_type: docType = 'unknown',
-    possible_tags: tags = [],
     confidence = null
   } = result
-
-  const existingSet = new Set(
-    (existingTagNames || []).map(n => n.toLowerCase())
-  )
-
-  const chips = tags.map(tag =>
-    renderChip(
-      tag,
-      existingSet.has(tag.toLowerCase()),
-      isTagAccepted(run, photoId, tag),
-      locked)
-  ).join('')
 
   // Omitted rather than shown as 0% or NaN% when the model gave no figure.
   const confidencePct = confidence == null ? '' : `${Math.round(confidence * 100)}%`
@@ -1093,9 +1111,7 @@ export function buildPanelHTML ({
         rows="4"${locked ? ' readonly' : ''}
       >${escapeHtml(summary)}</textarea>
 
-      <div class="autropy-chips" id="autropy-chips">
-        ${chips}
-      </div>
+      ${canSynthesize(run) ? '' : renderTagSection(run, photoId, existingTagNames)}
 
       ${metaSection}
 

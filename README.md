@@ -65,7 +65,13 @@ A page that fails does not end the run: it is marked failed in the pager, the ot
 the panel says how many did not work. Failed and unreached pages write nothing.
 
 Each page keeps its own summary, editable independently, and **Apply accepted** writes one note per
-page. Tags are pooled across the whole item and de-duplicated.
+page.
+
+**Tags belong to the item, not to a page.** They were always pooled on write — one de-duplicated set
+per item — but used to be reviewed page by page, so the same suggestion appeared once for every page
+that made it. On a multi-page item the chips now sit with the item summary: one list, decided once,
+and a tag you accept is set on every page that proposed it. Single-photo items keep their chips on
+the photo, having nowhere else to put them.
 
 **Each page is read with the three pages before it in view.** A dossier is not a pile of unrelated
 images — page four is often the second half of a letter begun on page three — so each page's prompt
@@ -82,8 +88,9 @@ Single-photo items are unaffected and still suggest metadata as before.
 ### The item summary
 
 **Item summary** is one description of the item as a whole, written from the page summaries. On a
-multi-page item it is written in the same pass and is what the panel opens on; the pages sit behind
-the pager. It is a text-only request — it reads the page descriptions, not the images again — and
+multi-page item it is written in the same pass, is the **first view in the pager** — position 0,
+before page 1 — and is what the panel opens on. The pages follow it, so you read from the whole to
+its parts. It is a text-only request — it reads the page descriptions, not the images again — and
 the scope dialog counts it before anything is billed.
 
 It is reviewed and written **exactly like a page summary**: edit the text, or empty the box to
@@ -317,7 +324,7 @@ machine-readable footer.
 ```
 📚 Machine-generated item summary — describes all pages of this item
 Generated 2026-09-13 16:02 by claude-opus-5
-Based on 8 page summaries, as you reviewed them.
+Based on 8 page summaries.
 
 <the summary>
 
