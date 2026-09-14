@@ -218,13 +218,44 @@ test('malformed model output is rejected rather than handed to the panel', async
     /no "summary" field/)
 })
 
-test('an unescaped quote inside a string value fails with the raw response shown', async () => {
+test('an unescaped quote inside a string value is repaired, not rejected', async () => {
   // The signature failure on quote-dense source material: the model quotes a
   // phrase from the document with a literal " instead of escaping it or using
-  // single quotes, and V8's parser desyncs well past the actual mistake — so
-  // the surfaced error must include the response itself, not just a position
-  // that points nowhere useful.
+  // single quotes. This is the one case worth repairing rather than rejecting —
+  // it is a structural ambiguity (was this " a delimiter or content?), not a
+  // guess about what the model meant, and a real closing quote is always
+  // followed by a JSON separator or the end of the response. Whether it comes
+  // back is the researcher's next request, not their own retyped one.
   const broken = '{"summary":"Mentions the firm "Lusitana" here.","document_type":"letter"}'
+
+  const { result } = await withFetch(
+    () => json({ content: [{ type: 'text', text: broken }] }),
+    () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k'))
+
+  assert.equal(result.summary, 'Mentions the firm "Lusitana" here.')
+  assert.equal(result.document_type, 'letter')
+})
+
+test('an already-escaped quote elsewhere in the response is left alone', async () => {
+  // The repair must not re-escape what the model already escaped correctly —
+  // only two fields deep, to make sure the walk survives leaving a string and
+  // re-entering one.
+  const text = '{"summary":"Fine.","document_type":"letter",' +
+    '"metadata_suggestions":{"title":"Says \\"Lusitana\\" once"}}'
+
+  const { result } = await withFetch(
+    () => json({ content: [{ type: 'text', text }] }),
+    () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k'))
+
+  assert.equal(result.metadata_suggestions.title, 'Says "Lusitana" once')
+})
+
+test('a structural error the quote repair cannot fix still fails honestly', async () => {
+  // Not every malformed response is a misplaced quote. A missing comma is
+  // repaired by nothing here, and the researcher should see the model's actual
+  // text and the real parser error — not a message implying a fix was tried
+  // and silently failed.
+  const broken = '{"summary":"A letter." "document_type":"letter"}'
 
   await assert.rejects(
     () => withFetch(

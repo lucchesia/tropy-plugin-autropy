@@ -146,6 +146,71 @@ export function describeModelProblem (model) {
 // JSON extraction
 // ---------------------------------------------------------------------------
 
+// A second line of defence behind the prompt's quoting instruction (see
+// prompt.js), for the case where the model does not follow it — which happens,
+// especially when it is quoting from a transcription it has itself just
+// described as corrupted, rather than composing prose of its own.
+//
+// This does not guess at content. It resolves a single structural ambiguity —
+// whether a `"` the model wrote was meant to CLOSE a string or was a literal
+// character inside one — using the same rule a person fixing this by eye would
+// use: a real closing quote is followed by a JSON separator (`,` `}` `]` `:`)
+// or the end of the response; anything else means the quote was content, so it
+// is escaped in place.
+//
+// It cannot make this worse. A misjudged quote does not silently produce a
+// plausible-but-wrong result — treating content as a delimiter desyncs the
+// string/non-string tracking for everything after it, which almost always
+// produces bare, unquoted tokens where JSON requires punctuation, and that
+// fails to parse. So the only two outcomes are: the ambiguity resolves and the
+// response parses, or it doesn't and parseResult falls through to the original,
+// honest parse error against the model's actual, unmodified text.
+function repairUnescapedQuotes (text) {
+  let out = ''
+  let inString = false
+  let escaped = false
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+
+    if (!inString) {
+      out += ch
+      if (ch === '"') inString = true
+      continue
+    }
+
+    if (escaped) {
+      out += ch
+      escaped = false
+      continue
+    }
+
+    if (ch === '\\') {
+      out += ch
+      escaped = true
+      continue
+    }
+
+    if (ch === '"') {
+      let j = i + 1
+      while (j < text.length && /\s/.test(text[j])) j++
+      const next = text[j]
+
+      if (next === undefined || ',}]:'.includes(next)) {
+        out += ch
+        inString = false
+      } else {
+        out += '\\"'
+      }
+      continue
+    }
+
+    out += ch
+  }
+
+  return out
+}
+
 // Models sometimes wrap JSON in markdown fences even when asked not to.
 //
 // `validate` is a parameter because a second kind of call is coming: the
@@ -162,10 +227,16 @@ function parseResult (text, validate = validateResult) {
   let parsed
   try {
     parsed = JSON.parse(raw)
-  } catch (err) {
-    throw new Error(
-      `[AUTROPY] could not read the model's response as JSON: ${err.message}\n` +
-      `Response began: ${raw.slice(0, 300)}`)
+  } catch (firstErr) {
+    try {
+      parsed = JSON.parse(repairUnescapedQuotes(raw))
+    } catch {
+      // The repair attempt's own error is not what the researcher needs — the
+      // original error, against the model's actual text, is the honest one.
+      throw new Error(
+        `[AUTROPY] could not read the model's response as JSON: ${firstErr.message}\n` +
+        `Response began: ${raw.slice(0, 300)}`)
+    }
   }
 
   return validate(parsed)
