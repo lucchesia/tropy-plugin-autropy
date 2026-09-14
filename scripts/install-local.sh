@@ -9,9 +9,12 @@
 # and then debug identical symptoms against code that is not running. This
 # always reports the version it installed, and refuses to overwrite a backup.
 #
-# Installs only the runtime files a plugin needs. Tropy must be fully quit
-# afterwards (Cmd+Q) and relaunched — reopening the window does not reload
-# plugin code.
+# Installs only the runtime files a plugin needs, at the SAME path every time.
+# Tropy's plugin loader caches an imported module by file path — so after this
+# runs, Tropy is still running whichever copy of the code was imported first in
+# this session, no matter how many times the files underneath change. Quitting
+# fully (Cmd+Q) and relaunching is what clears that cache; reopening the
+# project window reuses the same process and the same cache.
 
 set -euo pipefail
 

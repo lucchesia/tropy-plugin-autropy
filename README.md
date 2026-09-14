@@ -17,8 +17,10 @@ image. Nothing is written to your project until you accept it.
 Download the latest release from the **Releases** page of this repository, then in Tropy:
 **Preferences → Plugins → Install Plugin** and select the zip.
 
-**Quit Tropy completely (Cmd+Q) and relaunch.** Closing and reopening the project window is not
-enough — plugins are constructed when Tropy starts.
+Tropy reloads every open window the moment a plugin is installed — no restart needed for a
+first install. The one case that does need one: **if you are upgrading an Autropy you already have
+installed**, quit Tropy completely (Cmd+Q) and relaunch. Tropy keeps running the previously loaded
+copy of its code until the app restarts, even though Preferences reports the new version installed.
 
 Then open **Preferences → Plugins → Autropy** and set a **Model ID** and an **API Key**. The plugin
 does nothing until you invoke it.
@@ -408,9 +410,11 @@ To build the same zip the Releases page serves:
 npm run package     # writes dist/tropy-plugin-autropy-v<version>.zip
 ```
 
-Install it through **Preferences → Plugins → Install Plugin**, then quit Tropy completely (Cmd+Q) and
-relaunch. A full quit is required on every iteration — reopening the project window does not reload
-plugin code.
+Install it through **Preferences → Plugins → Install Plugin**. A full quit (Cmd+Q) and relaunch is
+required on every iteration, because this reinstalls at the same path each time: Tropy's plugin loader
+caches an imported module by file path, so it keeps running whichever copy of the code was imported
+first in this Tropy session, no matter how many times the files on disk change underneath it. Quitting
+is what clears that cache — the project window has nothing to do with it.
 
 ---
 
