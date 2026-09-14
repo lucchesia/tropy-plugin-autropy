@@ -109,6 +109,27 @@ function resolvePort (value) {
   return DEFAULT_PORT
 }
 
+// A one-line answer to "why did this suggest no metadata", written to the same
+// log line as the result it describes rather than left for a later reader to
+// reconstruct from the ledger. `suppressed` already carries the reason per
+// field (declined/absent/unwritable) — result-schema.js works it out, this
+// just renders it.
+function describeMetadataOutcome (result) {
+  if (result.metadata_suggestions) {
+    return ` — suggested: ${Object.keys(result.metadata_suggestions).join(', ')}`
+  }
+
+  if (!Array.isArray(result.suppressed) || result.suppressed.length === 0) return ''
+
+  const byReason = {}
+  for (const { field, reason } of result.suppressed) {
+    (byReason[reason] ??= []).push(field)
+  }
+
+  const parts = Object.entries(byReason).map(([reason, fields]) => `${reason}: ${fields.join(', ')}`)
+  return ` — no metadata (${parts.join('; ')})`
+}
+
 class AutropyPlugin {
   constructor (options, context) {
     this.options = Object.assign({}, AutropyPlugin.defaults, options)
@@ -765,7 +786,8 @@ class AutropyPlugin {
     logger.warn(
       `[AUTROPY] photo ${photoId} complete — ` +
       `confidence ${result.confidence ?? 'not reported'}` +
-      (servedModel && servedModel !== model ? `, served by ${servedModel}` : ''))
+      (servedModel && servedModel !== model ? `, served by ${servedModel}` : '') +
+      describeMetadataOutcome(result))
 
     // What the provider says it actually ran, which can differ from the ID
     // asked for when that ID is an alias. Provenance should record what ran.
@@ -847,7 +869,8 @@ class AutropyPlugin {
       setSynthesis(run, { result, sourceKey, incomplete })
 
       logger.warn(
-        `[AUTROPY] item summary complete — confidence ${result.confidence ?? 'not reported'}`)
+        `[AUTROPY] item summary complete — confidence ${result.confidence ?? 'not reported'}` +
+        describeMetadataOutcome(result))
 
       if (owned) this.#renderPanelInPlace(run, SYNTHESIS)
     } catch (err) {

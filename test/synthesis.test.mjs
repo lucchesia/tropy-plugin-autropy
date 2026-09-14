@@ -397,3 +397,25 @@ test('an unknown metadata write is never repeated', () => {
 
   assert.deepEqual(collectWrites(run).fields, {})
 })
+
+// The live bug: an item where the model suggested NO metadata at all. Nothing
+// was ever offered, so nothing could ever be accepted, so collectWrites never
+// records a metadata operation — and a lock that waited for one would wait
+// forever. Apply accepted stayed live indefinitely, and a second click wrote a
+// second item-summary note to the same photo.
+test('a summary with no metadata offered locks on its note alone', () => {
+  const run = item(4)
+  setSynthesis(run, {
+    result: validateSynthesis({ item_summary: 'A two-page letter.', confidence: 0.9 }),
+    sourceKey: synthesisKey(run),
+    incomplete: false
+  })
+
+  assert.equal(run.synthesis.result.metadata_suggestions, null,
+    'nothing was suggested, so there is nothing to accept')
+
+  recordOperation(run, { key: synthesisNoteOp(), kind: 'note', status: ACKNOWLEDGED })
+
+  assert.equal(isSynthesisLocked(run), true,
+    'the only write this apply could ever make has settled')
+})
