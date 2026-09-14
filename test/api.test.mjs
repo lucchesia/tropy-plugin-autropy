@@ -218,6 +218,21 @@ test('malformed model output is rejected rather than handed to the panel', async
     /no "summary" field/)
 })
 
+test('an unescaped quote inside a string value fails with the raw response shown', async () => {
+  // The signature failure on quote-dense source material: the model quotes a
+  // phrase from the document with a literal " instead of escaping it or using
+  // single quotes, and V8's parser desyncs well past the actual mistake — so
+  // the surfaced error must include the response itself, not just a position
+  // that points nowhere useful.
+  const broken = '{"summary":"Mentions the firm "Lusitana" here.","document_type":"letter"}'
+
+  await assert.rejects(
+    () => withFetch(
+      () => json({ content: [{ type: 'text', text: broken }] }),
+      () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k')),
+    /could not read the model's response as JSON[\s\S]*Response began: \{"summary"/)
+})
+
 test('JSON wrapped in markdown fences is still read', async () => {
   const { result } = await withFetch(
     () => json({ content: [{ type: 'text', text: '```json\n' + GOOD_JSON + '\n```' }] }),

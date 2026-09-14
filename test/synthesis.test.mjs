@@ -220,6 +220,20 @@ test('the synthesis prompt carries every page, in order, and no image', () => {
   assert.doesNotMatch(prompt, /base64/)
 })
 
+test('the model is told how to quote a phrase without breaking its own JSON', () => {
+  // A real failure: a Portuguese refugee-aid letter full of quoted firm names and
+  // a German salutation ('Hochverehrter Herr Graf!') led the model to quote a
+  // phrase with a literal, unescaped " — which breaks JSON.parse well past the
+  // actual mistake, so the reported error position is nearly useless as a clue.
+  // Telling the model how to quote is cheaper and safer than trying to repair
+  // its output afterward.
+  const run = item(2)
+  const prompt = buildSynthesisPrompt(synthesisSources(run), {})
+
+  assert.match(prompt, /use single quotes/)
+  assert.match(prompt, /breaks the whole response/)
+})
+
 test('the prompt uses the edited text, not the model original', () => {
   const run = item(3)
   setSummaryDraft(run, 101, 'My own reading of page two.')

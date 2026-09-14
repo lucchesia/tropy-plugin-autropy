@@ -26,12 +26,24 @@ const ANALYSIS_INSTRUCTIONS = `You are a highly specialized historian and archiv
 - Identify the language(s) in use across the document whenever determinable.
 - Be transparent about uncertainty. A cautious and honest description is more valuable than a confident but incorrect one.`
 
+// A literal, unescaped " inside a JSON string is the single most common way
+// this breaks: the source documents are often quote-dense (firm names, a
+// salutation, a stamp's abbreviation), and a model quoting one verbatim with a
+// straight double quote — rather than escaping it or using a single quote —
+// desyncs the parser well past the point of failure, so the error position
+// rarely points at the actual mistake. Telling the model how to quote is
+// cheaper than trying to repair its output after the fact, and safer: a
+// repair heuristic could silently rewrite what the model actually said.
+const JSON_QUOTING_NOTE = "If you quote a word or short phrase from the " +
+  "document itself, use single quotes ('like this') rather than double quotes " +
+  '\u2014 a literal " inside a JSON string value breaks the whole response.'
+
 // ---------------------------------------------------------------------------
 // JSON output format block — ALWAYS appended, even when using a custom prompt.
 // Without this block the model returns prose and JSON.parse fails silently.
 // ---------------------------------------------------------------------------
 
-const JSON_FORMAT_BLOCK = `**Your response must be valid JSON only — no preamble, no markdown, no explanation outside the JSON block:**
+const JSON_FORMAT_BLOCK = `**Your response must be valid JSON only — no preamble, no markdown, no explanation outside the JSON block. ${JSON_QUOTING_NOTE}**
 
 {
   "summary": "<3-6 sentences of scholarly prose integrating visual and textual analysis. Identify document type, purpose, people, places, dates, and institutions when visible. State explicitly if a transcription was used (e.g. 'Based on the available transcription...') or if only partial text could be interpreted from the image.>",
@@ -222,7 +234,7 @@ const SYNTHESIS_INSTRUCTIONS = `You are a historian and archival researcher writ
 - Where the pages disagree or one is uncertain, say so plainly instead of resolving it silently.
 - Do not introduce facts that are not present in the page descriptions. You are not looking at the images.`
 
-const SYNTHESIS_FORMAT_BLOCK = `**Your response must be valid JSON only — no preamble, no markdown, no explanation outside the JSON block:**
+const SYNTHESIS_FORMAT_BLOCK = `**Your response must be valid JSON only — no preamble, no markdown, no explanation outside the JSON block. ${JSON_QUOTING_NOTE}**
 
 {
   "item_summary": "<4-8 sentences describing the item as a whole, as a catalogue entry would.>",
