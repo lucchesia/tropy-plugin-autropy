@@ -25,6 +25,9 @@ import {
   appliedSummary,
   collectWrites,
   createRun,
+  dropOperation,
+  hasUndoableWrites,
+  undoableWrites,
   imageFingerprint,
   isFieldAccepted,
   isLocked,
@@ -432,4 +435,101 @@ test('panel queries are scoped to the panel', () => {
   assert.doesNotMatch(body, /document\.querySelectorAll/,
     'a document-wide query works only while exactly one panel exists')
   assert.doesNotMatch(body, /document\.getElementById/)
+})
+
+// ── undo ───────────────────────────────────────────────────────────────────
+//
+// Undo is the mirror of collectWrites, and it is governed by the same rule from
+// the other side: a write whose outcome is unknown must not be repeated, and
+// must not be deleted either. Both would be acting on a guess about something
+// in the researcher's project.
+
+function applied (ops) {
+  const run = createRun({
+    projectPath: '/p.tropy', itemId: 20, model: 'claude-opus-5', photoIds: [1]
+  })
+
+  for (const op of ops) {
+    recordOperation(run, { status: ACKNOWLEDGED, ...op })
+  }
+
+  return run
+}
+
+test('an acknowledged note is undoable by the id it returned', () => {
+  const run = applied([{ key: noteOp(1), kind: 'note', noteId: 4711 }])
+  const { notes, unresolved } = undoableWrites(run)
+
+  assert.deepEqual(notes, [{ key: 'note:photo-1', noteId: 4711 }])
+  assert.equal(unresolved.length, 0)
+})
+
+test('an unknown note is listed for the researcher, never deleted', () => {
+  // It may or may not exist, and Tropy returned no id for it. Deleting on a
+  // guess is the one outcome worse than leaving a stray note behind.
+  const run = applied([
+    { key: noteOp(1), kind: 'note', status: UNKNOWN, describe: 'writing the note' }
+  ])
+  const { notes, unresolved } = undoableWrites(run)
+
+  assert.equal(notes.length, 0)
+  assert.equal(unresolved.length, 1)
+  assert.equal(hasUndoableWrites(run), false)
+})
+
+test('a rejected write is not undoable, because it never landed', () => {
+  const run = applied([{ key: noteOp(1), kind: 'note', status: REJECTED }])
+
+  assert.equal(hasUndoableWrites(run), false)
+  assert.equal(undoableWrites(run).unresolved.length, 0)
+})
+
+test('a tag the item already carried is left on the item', () => {
+  // Autropy applying a tag the researcher had already applied is a no-op, and
+  // undoing a no-op would remove her tag.
+  const run = applied([
+    { key: tagOp('passport'), kind: 'tag', tagId: 7, tagName: 'passport', preexisting: true },
+    { key: tagOp('visa'), kind: 'tag', tagId: 8, tagName: 'visa' }
+  ])
+
+  assert.deepEqual(
+    undoableWrites(run).tags.map(t => t.name),
+    ['visa'])
+})
+
+test('metadata is undoable only when the previous values were read', () => {
+  const withBefore = applied([{
+    key: metadataOp(20),
+    kind: 'metadata',
+    wrote: { title: 'A letter' },
+    before: { title: '' }
+  }])
+
+  assert.deepEqual(undoableWrites(withBefore).metadata.before, { title: '' })
+
+  const withoutBefore = applied([{
+    key: metadataOp(20), kind: 'metadata', wrote: { title: 'A letter' }
+  }])
+
+  assert.equal(undoableWrites(withoutBefore).metadata, null,
+    'with nothing to put back, an undo would only delete')
+  assert.equal(undoableWrites(withoutBefore).unresolved.length, 1)
+})
+
+test('a run with every write reverted is a draft again', () => {
+  // Which is the point of undo: the suggestions survive, the writes do not, and
+  // the same run can be applied again. A test that cannot be re-run is not much
+  // of a test.
+  const run = applied([
+    { key: noteOp(1), kind: 'note', noteId: 4711 },
+    { key: tagOp('visa'), kind: 'tag', tagId: 8, tagName: 'visa' }
+  ])
+
+  assert.equal(isLocked(run), true)
+
+  dropOperation(run, noteOp(1))
+  dropOperation(run, tagOp('visa'))
+
+  assert.equal(ledgerState(run), DRAFT)
+  assert.equal(isLocked(run), false)
 })

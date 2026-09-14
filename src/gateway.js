@@ -32,7 +32,7 @@
 // discarded before it reaches the provider, and a write be reported loudly.
 
 import { basename, extname } from 'node:path'
-import { flattenMetadata, toMetadataPayload } from './dc.js'
+import { flattenMetadata, toMetadataPayload, toMetadataRestorePayload } from './dc.js'
 
 // Write outcomes. A write is not success/failure: a network failure can happen
 // after the server commits and before the client sees the response, and that
@@ -360,6 +360,18 @@ export class RestProjectGateway {
     return tags
   }
 
+  // The tags already on the item, read before an Apply adds any.
+  //
+  // Not the same question as getTags(), which lists the project's vocabulary.
+  // This one exists so Undo can tell a tag Autropy attached from a tag the
+  // researcher had already attached — removing the second would be Autropy
+  // undoing someone else's work.
+  async getItemTags (itemId) {
+    const tags = await this.#read(
+      `/items/${itemId}/tags`, `reading the tags on item ${itemId}`)
+    return Array.isArray(tags) ? tags : []
+  }
+
   async getMetadata (itemId) {
     const raw = await this.#read(`/data/${itemId}`, `reading metadata for item ${itemId}`)
     return flattenMetadata(raw)
@@ -426,11 +438,17 @@ export class RestProjectGateway {
       }
     }
 
-    return this.#write(`/items/${itemId}/tags`, {
+    const outcome = await this.#write(`/items/${itemId}/tags`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tag: tagId })
     }, `applying tag "${tagName}"`)
+
+    // Carried back so the ledger can record it. Undo addresses a tag by id —
+    // the name is what the researcher reads, the id is what Tropy accepts.
+    outcome.tagId = tagId
+
+    return outcome
   }
 
   // Notes are the one non-idempotent write here, so the returned id is kept:
@@ -460,5 +478,58 @@ export class RestProjectGateway {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     }, `saving metadata on item ${itemId}`)
+  }
+
+  // ── taking a write back ──────────────────────────────────────────────────
+  //
+  // Each of these reverses exactly one write the ledger recorded, and refuses
+  // to act on an id it was not given. None of them is a general-purpose delete:
+  // Undo may only remove what this run put there.
+
+  async deleteNote (noteId) {
+    const id = Number(noteId)
+    const describe = `deleting note ${noteId}`
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return { status: REJECTED, describe, detail: 'no note id was recorded for it' }
+    }
+
+    return this.#write(`/notes/${id}`, { method: 'DELETE' }, `deleting note ${id}`)
+  }
+
+  // Detaches a tag from ONE item. It never deletes the tag from the project —
+  // that is DELETE /tags, which removes it from every item that carries it, and
+  // nothing in Autropy should be able to reach it.
+  //
+  // The guard on tagId is not defensive tidiness. Verified in Tropy Beta
+  // 1.18.0-beta.5: `tags.remove` falls back to `act.tag.clear({ id })` when the
+  // request body carries no tag — so a DELETE missing one number strips every
+  // tag off the item, the researcher's own included.
+  async removeTag (itemId, tagId, tagName) {
+    const id = Number(tagId)
+    const describe = `removing tag "${tagName}" from item ${itemId}`
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return { status: REJECTED, describe, detail: 'no tag id was recorded for it' }
+    }
+
+    return this.#write(`/items/${itemId}/tags`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag: id })
+    }, describe)
+  }
+
+  // Puts the item's own values back. An empty previous value is written as an
+  // empty string on purpose — see toMetadataRestorePayload.
+  async restoreMetadata (itemId, before) {
+    const payload = toMetadataRestorePayload(before)
+    if (Object.keys(payload).length === 0) return null
+
+    return this.#write(`/data/${itemId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, `restoring the previous metadata on item ${itemId}`)
   }
 }

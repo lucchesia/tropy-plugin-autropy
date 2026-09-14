@@ -132,7 +132,7 @@ Adding or changing a transcription invalidates that page's cached analysis. The 
 ### After you apply
 
 Once something has been written, the panel becomes a receipt rather than a form. Reopening it shows
-what was written, when and by which model, and offers only **Close** and **Re-analyze**. Notes cannot
+what was written, when and by which model, and offers **Close**, **Re-analyze** and **Undo this analysis**. Notes cannot
 be written twice safely, so an applied analysis is not re-applied.
 
 **Re-analyze** is a new analysis: applying it adds to what is already on the item rather than
@@ -141,6 +141,28 @@ replacing it, and the panel says so.
 If a write's outcome is uncertain — the connection to Tropy dropped at the wrong moment, so it may or
 may not have been saved — Autropy does not repeat it and does not offer to. It names what to check.
 Every note carries the id of the run that wrote it, so searching your notes for `run <id>` finds it.
+
+### Undoing an analysis
+
+The receipt also offers **Undo this analysis**. It removes the notes that analysis wrote, detaches the
+tags it added, and puts back the metadata values it replaced — after asking, and listing what will go.
+
+What it deliberately leaves alone:
+
+- **A tag your item already had.** Autropy re-applying a tag you had applied yourself changed nothing,
+  so undoing it would remove your tag, not its own.
+- **The tag itself.** A tag is detached from this item only. It stays in your project, on every other
+  item that carries it.
+- **A field you have edited since.** If a value no longer matches what Autropy wrote, you have changed
+  it, and your version is kept. Autropy says which fields it left.
+- **A write it never had confirmed.** If Tropy's acknowledgement was lost, Autropy does not know
+  whether there is anything to remove, so it names the write instead of deleting on a guess.
+
+A field that was empty before the analysis is emptied again, rather than left holding the suggestion.
+
+Once everything has been undone, the panel unlocks: the suggestions are still there and can be applied
+again. That is deliberate — trying a model on real material means being able to apply it, look, and
+put the item back.
 
 ---
 

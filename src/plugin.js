@@ -51,6 +51,7 @@ import {
   appliedSummary,
   collectWrites,
   createRun,
+  dropOperation,
   digest,
   imageFingerprint,
   isLocked,
@@ -78,6 +79,7 @@ import {
   synthesisNoteOp,
   synthesisSources,
   tagOp,
+  undoableWrites,
   toggleField,
   toggleSynthesisField,
   isItemTagAccepted,
@@ -1267,6 +1269,15 @@ class AutropyPlugin {
       })
     })
 
+    panel.querySelector('#autropy-undo')?.addEventListener('click', () => {
+      this.#undoRun(run, photoId).catch(err => {
+        this.context.logger.error(
+          { stack: err.stack }, `[AUTROPY] undo failed: ${err.message}`)
+        run.notices.push({ kind: 'warn', text: err.message })
+        this.#renderStatus()
+      })
+    })
+
     panel.querySelector('#autropy-dismiss')?.addEventListener('click', () => {
       this.#dismissPanel()
     })
@@ -1427,13 +1438,26 @@ class AutropyPlugin {
   // The ledger entry is the part that matters: it is written the moment the
   // outcome is known, so a run that dies between two writes still knows which
   // of them landed.
-  #recordOutcome (run, { key, kind, outcome, wrote }) {
+  #recordOutcome (
+    run, { key, kind, outcome, wrote, before, tagName, preexisting }
+  ) {
     if (!outcome) return
 
-    const { status, describe, detail, targetChanged, noteId } = outcome
+    const { status, describe, detail, targetChanged, noteId, tagId } = outcome
 
     if (status === ACKNOWLEDGED) {
-      recordOperation(run, { key, kind, status: OP_ACKNOWLEDGED, describe, noteId, wrote })
+      recordOperation(run, {
+        key,
+        kind,
+        status: OP_ACKNOWLEDGED,
+        describe,
+        noteId,
+        wrote,
+        before,
+        tagId,
+        tagName,
+        preexisting
+      })
       run.notices.push({ kind: 'ok', text: `Done: ${describe}.` })
 
       if (targetChanged) {
@@ -1526,10 +1550,32 @@ class AutropyPlugin {
       run, () => gateway.getTags(), [],
       'Existing tags could not be re-read; a tag may be created that already exists.')
 
+    // Which tags the item already carries, read BEFORE any are added — the only
+    // moment the answer is still true. Undo removes what this apply attached
+    // and nothing else, and it cannot work that out afterwards.
+    //
+    // A failed read falls back to null, and null is read below as "assume the
+    // researcher put it there": Undo then leaves every tag alone. Leaving a tag
+    // Autropy added is a tidying job; removing one the researcher added is
+    // destroying their work.
+    const itemTagsBefore = await this.#readOrDegrade(
+      run, () => gateway.getItemTags(itemId), null,
+      'The tags already on this item could not be read, so Undo will leave tags ' +
+      'alone rather than risk removing one you added yourself.')
+
+    const tagWasAlreadyOnItem = name => !Array.isArray(itemTagsBefore) ||
+      itemTagsBefore.some(t => String(t?.name ?? '').toLowerCase() === name.toLowerCase())
+
     for (const tagName of tags) {
       recordOperation(run, { key: tagOp(tagName), kind: 'tag', status: OP_PENDING })
       const outcome = await gateway.applyTag(itemId, tagName, existingTags)
-      this.#recordOutcome(run, { key: tagOp(tagName), kind: 'tag', outcome })
+      this.#recordOutcome(run, {
+        key: tagOp(tagName),
+        kind: 'tag',
+        outcome,
+        tagName,
+        preexisting: tagWasAlreadyOnItem(tagName)
+      })
     }
 
     for (const note of notes) {
@@ -1553,12 +1599,31 @@ class AutropyPlugin {
 
     if (Object.keys(fields).length > 0) {
       const key = metadataOp(itemId)
+
+      // The item's own values for exactly the fields about to be overwritten,
+      // read immediately before the write rather than reused from the analysis
+      // — the panel may have sat open for minutes, and a value edited by hand
+      // in the meantime is the value an undo must put back.
+      //
+      // A field that is empty now is recorded as empty, not omitted. Restoring
+      // it means clearing it, and an undo that skipped it would leave Autropy's
+      // suggestion behind.
+      const current = await this.#readOrDegrade(
+        run, () => gateway.getMetadata(itemId), null,
+        'The current metadata could not be re-read, so Undo will not be able to ' +
+        'put these fields back.')
+
+      const before = current
+        ? Object.fromEntries(
+          Object.keys(fields).map(field => [field, current[field] ?? '']))
+        : null
+
       recordOperation(run, { key, kind: 'metadata', status: OP_PENDING, wrote: fields })
 
       const outcome = await gateway.saveMetadata(itemId, fields)
 
       if (outcome) {
-        this.#recordOutcome(run, { key, kind: 'metadata', outcome, wrote: fields })
+        this.#recordOutcome(run, { key, kind: 'metadata', outcome, wrote: fields, before })
       } else {
         // saveMetadata returns null when every accepted field was dropped as
         // unwritable. That used to pass through #recordOutcome's null guard and
@@ -1595,6 +1660,216 @@ class AutropyPlugin {
     // written, when, and by which model. Closing it here is what let a second
     // Apply look like a first one.
     this.#renderPanelInPlace(run, photoId)
+  }
+
+  // ── undo ─────────────────────────────────────────────────────────────────
+
+  // Takes back what one run wrote: its notes, the tags it attached, and the
+  // metadata values it replaced.
+  //
+  // This exists because testing a proposal-making tool means applying it and
+  // looking, and until now looking was a one-way door — every trial run left
+  // notes to delete and fields to retype by hand. But it is also a control the
+  // researcher should have had regardless. Autropy writes into her project; she
+  // should be able to say no afterwards, not only before.
+  //
+  // What it will NOT do, in each case because the alternative risks destroying
+  // something that is not Autropy's to destroy:
+  //
+  //   - a write whose outcome was `unknown` is left alone and named. It may
+  //     have landed; the id that would identify it was never returned.
+  //   - a tag the item already carried before the apply stays on the item.
+  //   - a tag is detached from this item, never deleted from the project.
+  //   - a field whose value no longer matches what Autropy wrote was edited by
+  //     hand since, so it is left exactly as it is and reported.
+  async #undoRun (run, photoId) {
+    const { logger } = this.context
+    const { itemId } = run
+    const port = resolvePort(this.options.port)
+
+    const { notes, tags, metadata, unresolved } = undoableWrites(run)
+    if (notes.length === 0 && tags.length === 0 && !metadata) return
+
+    const current = this.#readNav()
+    if (current.itemId !== itemId || this.#projectPath() !== run.projectPath) {
+      this.#fatal(
+        'Nothing was undone',
+        'The item on screen is no longer the one this analysis was applied to, ' +
+        'so Autropy stopped rather than delete notes from the wrong item.')
+      return
+    }
+
+    const counts = [
+      notes.length ? `${notes.length} note${notes.length === 1 ? '' : 's'}` : null,
+      tags.length ? `${tags.length} tag${tags.length === 1 ? '' : 's'}` : null,
+      metadata ? `${Object.keys(metadata.wrote).length} metadata field(s)` : null
+    ].filter(Boolean).join(', ')
+
+    if (!(await this.#confirmUndo(counts, unresolved))) return
+
+    const gateway = this.#gatewayFor(run.projectPath, port)
+
+    try {
+      await gateway.assertWriteTarget()
+    } catch (err) {
+      logger.error({ stack: err.stack }, `[AUTROPY] refused to undo: ${err.message}`)
+      this.#fatal('Nothing was undone', err.message)
+      return
+    }
+
+    run.notices = run.notices.filter(n => n.kind === 'info')
+
+    for (const note of notes) {
+      const outcome = await gateway.deleteNote(note.noteId)
+      if (outcome.status === ACKNOWLEDGED) {
+        dropOperation(run, note.key)
+        run.notices.push({ kind: 'ok', text: `Removed: note ${note.noteId}.` })
+      } else {
+        run.notices.push({
+          kind: 'warn',
+          text: `Could not remove note ${note.noteId} (${outcome.detail}). ` +
+                'It is still in Tropy.'
+        })
+      }
+    }
+
+    for (const tag of tags) {
+      const outcome = await gateway.removeTag(itemId, tag.tagId, tag.name)
+      if (outcome.status === ACKNOWLEDGED) {
+        dropOperation(run, tag.key)
+        run.notices.push({
+          kind: 'ok',
+          text: `Removed: tag "${tag.name}" (the tag itself still exists in the project).`
+        })
+      } else {
+        run.notices.push({
+          kind: 'warn',
+          text: `Could not remove the tag "${tag.name}" (${outcome.detail}).`
+        })
+      }
+    }
+
+    if (metadata) await this.#undoMetadata(run, gateway, metadata)
+
+    for (const op of unresolved) {
+      run.notices.push({
+        kind: 'unknown',
+        text: `Left alone: ${op.describe || op.key}. Autropy never confirmed this ` +
+              'write, so it cannot tell whether there is anything to remove — ' +
+              'check it in Tropy.'
+      })
+    }
+
+    logger.warn(
+      `[AUTROPY] undo finished — run ${run.id}, item ${itemId}, ledger ` +
+      `${ledgerState(run)}`)
+
+    this.#renderPanelInPlace(run, photoId)
+  }
+
+  // Splits the metadata undo out because it is the only part with a question to
+  // answer per field: is this still the value Autropy wrote?
+  async #undoMetadata (run, gateway, metadata) {
+    const { itemId } = run
+
+    // Read fresh, not reused. Between the apply and now the researcher may have
+    // corrected a suggested title — that correction is hers, and restoring the
+    // old value over it would be Autropy deleting her work in the name of
+    // deleting its own.
+    let now = null
+    try {
+      now = await gateway.getMetadata(itemId)
+    } catch (err) {
+      run.notices.push({
+        kind: 'warn',
+        text: 'The item metadata could not be read, so the fields were left as ' +
+              `they are (${err.message}).`
+      })
+      return
+    }
+
+    const restore = {}
+    const edited = []
+
+    for (const [field, written] of Object.entries(metadata.wrote)) {
+      const value = now[field] ?? ''
+      if (String(value).trim() !== String(written).trim()) {
+        edited.push(field)
+        continue
+      }
+      restore[field] = metadata.before[field] ?? ''
+    }
+
+    if (edited.length > 0) {
+      run.notices.push({
+        kind: 'info',
+        text: `Left as they are: ${edited.join(', ')} — these no longer hold what ` +
+              'Autropy wrote, so they have been edited since and the edit is kept.'
+      })
+    }
+
+    if (Object.keys(restore).length === 0) {
+      dropOperation(run, metadata.key)
+      return
+    }
+
+    const outcome = await gateway.restoreMetadata(itemId, restore)
+
+    if (outcome && outcome.status === ACKNOWLEDGED) {
+      dropOperation(run, metadata.key)
+      const cleared = Object.entries(restore)
+        .filter(([, v]) => String(v).trim() === '')
+        .map(([f]) => f)
+
+      run.notices.push({
+        kind: 'ok',
+        text: `Restored: ${Object.keys(restore).join(', ')}` +
+              (cleared.length > 0
+                ? ` (${cleared.join(', ')} ${cleared.length === 1 ? 'was' : 'were'} ` +
+                  'empty before, and is empty again).'
+                : '.')
+      })
+      return
+    }
+
+    run.notices.push({
+      kind: 'warn',
+      text: 'Could not put the previous metadata back ' +
+            `(${outcome?.detail ?? 'no response from Tropy'}).`
+    })
+  }
+
+  // Asked before anything is deleted, and it says what will go. A dialog that
+  // cannot be shown means no confirmation was given, so nothing happens — the
+  // opposite of the scope dialog's fallback, because the cautious answer here
+  // is to do nothing rather than the smaller thing.
+  async #confirmUndo (counts, unresolved) {
+    const detail =
+      `Autropy will remove ${counts} from this item, putting any metadata it ` +
+      'replaced back the way it was.\n\n' +
+      'Tags are removed from this item only — they stay in the project. A field ' +
+      'you have edited since is left alone.' +
+      (unresolved.length > 0
+        ? `\n\n${unresolved.length} write(s) were never confirmed by Tropy and ` +
+          'cannot be undone from here; they will be listed afterwards.'
+        : '')
+
+    try {
+      const { response } = await this.context.dialog.show('message-box', {
+        type: 'warning',
+        message: 'Undo this analysis?',
+        detail,
+        buttons: ['Undo it', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1
+      })
+
+      return response === 0
+    } catch (err) {
+      this.context.logger.error(
+        { stack: err.stack }, `[AUTROPY] could not ask about undo: ${err.message}`)
+      return false
+    }
   }
 
   // Rebuilds the panel from the run without touching the caches, so a locked run

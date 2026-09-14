@@ -51,3 +51,26 @@ export function toMetadataPayload (fields) {
 
   return payload
 }
+
+// Maps short-name fields to a payload that puts PREVIOUS values back, empty
+// ones included.
+//
+// The difference from toMetadataPayload is the whole point of undo. Verified in
+// Tropy Beta 1.18.0-beta.5's `mod.update`: a metadata save deletes every
+// property named in the payload and then re-inserts only those whose text is
+// non-blank. So an empty string is not a dropped field here — it is how a field
+// that was empty before the analysis is made empty again. A write payload is
+// right to drop it; an undo payload that dropped it would leave Autropy's value
+// in place and call that an undo.
+export function toMetadataRestorePayload (fields) {
+  const payload = {}
+  if (!fields || typeof fields !== 'object') return payload
+
+  for (const [key, value] of Object.entries(fields)) {
+    const uri = DC_WRITE_URIS[key]
+    if (!uri) continue
+    payload[uri] = value == null ? '' : String(value)
+  }
+
+  return payload
+}

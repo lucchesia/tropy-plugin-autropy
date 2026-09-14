@@ -21,6 +21,7 @@ import {
   SYNTHESIS,
   UNCERTAIN,
   appliedSummary,
+  hasUndoableWrites,
   canSynthesize,
   isFieldAccepted,
   isLocked,
@@ -405,6 +406,10 @@ export const PANEL_STYLES = `
 
   .autropy-banner--uncertain {
     border-color: #b03a3a;
+  }
+
+  .autropy-banner__undo {
+    margin-top: 6px;
   }
 
   .autropy-banner__line {
@@ -1033,9 +1038,20 @@ function renderAppliedBanner (run) {
         </div>`
   }
 
+  // Offered on the receipt rather than among the actions, because it belongs to
+  // what was written, not to what is being decided. It appears only when the
+  // ledger holds something that can actually be reversed — an Undo that would
+  // do nothing is worse than none, since it implies the writes are gone.
+  const undo = hasUndoableWrites(run)
+    ? `
+        <div class="autropy-banner__undo">
+          <button class="autropy-btn" id="autropy-undo">Undo this analysis</button>
+        </div>`
+    : ''
+
   return `
       <div class="autropy-banner autropy-banner--${escapeAttr(applied.state)}">
-        <div class="autropy-banner__line">${escapeHtml(detail)}</div>${uncertain}
+        <div class="autropy-banner__line">${escapeHtml(detail)}</div>${uncertain}${undo}
       </div>`
 }
 

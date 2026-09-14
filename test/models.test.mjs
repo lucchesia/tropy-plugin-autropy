@@ -17,7 +17,13 @@ import {
   validateSynthesis
 } from '../src/result-schema.js'
 import { buildPanelHTML } from '../src/panel-template.js'
-import { createRun, setResult } from '../src/run.js'
+import {
+  ACKNOWLEDGED as OP_ACKNOWLEDGED,
+  createRun,
+  noteOp,
+  recordOperation,
+  setResult
+} from '../src/run.js'
 
 // ── provider routing ───────────────────────────────────────────────────────
 
@@ -283,4 +289,32 @@ test('a panel with one model shows no picker — the model lives in Preferences'
   })
 
   assert.doesNotMatch(html, /id="autropy-model"/)
+})
+
+// ── the undo offer ─────────────────────────────────────────────────────────
+
+function appliedPanel (op) {
+  const run = createRun({
+    projectPath: '/p.tropy', itemId: 1, model: 'claude-opus-5', photoIds: [2]
+  })
+  setResult(run, 2, { result: validateResult({ summary: 'x' }) })
+  recordOperation(run, { kind: 'note', status: OP_ACKNOWLEDGED, ...op })
+
+  return buildPanelHTML({
+    run, photoId: 2, existingTagNames: [], suggestMetadata: true
+  })
+}
+
+test('an applied run offers to undo itself', () => {
+  assert.match(appliedPanel({ key: noteOp(2), noteId: 4711 }), /id="autropy-undo"/)
+})
+
+test('a run with nothing reversible does not offer an undo that would do nothing', () => {
+  // The note may exist and Tropy never returned its id. Offering Undo here
+  // would say the writes are gone when they may not be.
+  const html = appliedPanel({
+    key: noteOp(2), status: 'unknown', describe: 'writing the note'
+  })
+
+  assert.doesNotMatch(html, /id="autropy-undo"/)
 })

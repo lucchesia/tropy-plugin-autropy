@@ -180,3 +180,67 @@ test('a flat write whose target moved is acknowledged but flagged', async () => 
   assert.equal(outcome.status, ACKNOWLEDGED)
   assert.equal(outcome.targetChanged, true)
 })
+
+// ── undoing a write ────────────────────────────────────────────────────────
+//
+// Each of these reverses one recorded write. The guards are the point: Tropy's
+// own delete routes are wider than what Autropy is allowed to do with them.
+
+test('a note is deleted by the id the ledger recorded', async () => {
+  const { fetch, calls } = writing(() => jsonResponse({}))
+  const outcome = await gateway(fetch).deleteNote(4711)
+
+  assert.equal(outcome.status, ACKNOWLEDGED)
+
+  const del = calls.find(c => c.method === 'DELETE')
+  assert.match(del.url, /\/notes\/4711$/)
+})
+
+test('a note with no recorded id is refused, not guessed at', async () => {
+  const { fetch, calls } = writing(() => jsonResponse({}))
+  const outcome = await gateway(fetch).deleteNote(null)
+
+  assert.equal(outcome.status, REJECTED)
+  assert.equal(calls.filter(c => c.method === 'DELETE').length, 0)
+})
+
+test('a tag is detached from one item, by id', async () => {
+  const { fetch, calls } = writing(() => jsonResponse({}))
+  const outcome = await gateway(fetch).removeTag(1049, 33, 'passport')
+
+  assert.equal(outcome.status, ACKNOWLEDGED)
+
+  const del = calls.find(c => c.method === 'DELETE')
+  assert.match(del.url, /\/items\/1049\/tags$/,
+    'never /tags, which deletes the tag from every item in the project')
+  assert.deepEqual(JSON.parse(del.body), { tag: 33 })
+})
+
+test('a tag with no id never becomes a request', async () => {
+  // Verified in Tropy Beta 1.18.0-beta.5: DELETE /items/:id/tags with no tag in
+  // the body falls through to tag.clear and strips every tag off the item.
+  const { fetch, calls } = writing(() => jsonResponse({}))
+  const outcome = await gateway(fetch).removeTag(1049, undefined, 'passport')
+
+  assert.equal(outcome.status, REJECTED)
+  assert.equal(calls.filter(c => c.method === 'DELETE').length, 0,
+    'a DELETE missing the tag id would clear the item')
+})
+
+test('restoring metadata writes empty values back, rather than skipping them', async () => {
+  // The asymmetry with saveMetadata: an empty value is dropped from a write and
+  // is the whole substance of an undo. Tropy deletes every property named in
+  // the payload and re-inserts only the non-blank ones, so '' clears the field.
+  const { fetch, calls } = writing(() => jsonResponse({}))
+  const outcome = await gateway(fetch)
+    .restoreMetadata(1049, { title: 'Original title', description: '' })
+
+  assert.equal(outcome.status, ACKNOWLEDGED)
+
+  const post = calls.find(c => c.method === 'POST')
+  const body = JSON.parse(post.body)
+
+  assert.equal(body['http://purl.org/dc/elements/1.1/title'], 'Original title')
+  assert.equal(body['http://purl.org/dc/elements/1.1/description'], '',
+    'the field was empty before the analysis, so undoing means emptying it')
+})
