@@ -164,6 +164,13 @@ Once everything has been undone, the panel unlocks: the suggestions are still th
 again. That is deliberate — trying a model on real material means being able to apply it, look, and
 put the item back.
 
+**On Tropy Beta 1.18.0-beta.5, removing a tag through Undo does not work — verified live, and it is
+Tropy's bug, not Autropy's.** `DELETE /project/:project/items/:id/tags`, the only route that detaches
+one tag from one item, crashes inside Tropy's own REST layer on every call: `Cannot set properties of
+undefined (setting 'rsvp')`. No request shape avoids it. Notes and metadata undo normally; when a tag
+removal fails this way, Autropy says so and names the tags — remove them by hand in the item's Tags
+panel.
+
 ---
 
 ## Plugin configuration

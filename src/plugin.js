@@ -1756,6 +1756,8 @@ class AutropyPlugin {
       }
     }
 
+    const failedTags = []
+
     for (const tag of tags) {
       const outcome = await gateway.removeTag(itemId, tag.tagId, tag.name)
       if (outcome.status === ACKNOWLEDGED) {
@@ -1765,11 +1767,27 @@ class AutropyPlugin {
           text: `Removed: tag "${tag.name}" (the tag itself still exists in the project).`
         })
       } else {
-        run.notices.push({
-          kind: 'warn',
-          text: `Could not remove the tag "${tag.name}" (${outcome.detail}).`
-        })
+        failedTags.push(tag.name)
       }
+    }
+
+    // Verified live against Tropy Beta 1.18.0-beta.5: DELETE .../items/:id/tags
+    // crashes server-side on every call — `ctx.rsvp('project', …)`, the
+    // two-argument form this one route uses and no other write here does,
+    // throws inside Tropy's own window-manager dispatch before it reaches the
+    // tag-removal logic at all. No request shape avoids it; it is not
+    // something Autropy sent wrong. One consolidated notice rather than one
+    // per tag, since it is the same failure for all of them and repeating it
+    // would read as several different problems.
+    if (failedTags.length > 0) {
+      run.notices.push({
+        kind: 'warn',
+        text: `Tropy's own tag-removal API rejected all ${failedTags.length} tag(s) ` +
+              `(${failedTags.join(', ')}) — this is a bug in Tropy Beta's REST API, ` +
+              'not something this Apply did wrong, and Autropy cannot work around it. ' +
+              'Remove them by hand: open the Tags panel for this item in Tropy and ' +
+              'click each one off.'
+      })
     }
 
     if (metadata) await this.#undoMetadata(run, gateway, metadata)
