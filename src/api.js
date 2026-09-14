@@ -425,6 +425,36 @@ const SYNTHESIS_TOOL_SCHEMA = {
   required: ['item_summary', 'metadata_suggestions', 'confidence']
 }
 
+// The escape hatch — and the reason it had to exist.
+//
+// `tool_choice: { type: 'any' }` guarantees a tool call. It does not guarantee
+// that the call fits the schema: Anthropic checks that a tool by that name was
+// offered and passes the arguments through, so a model that wants to say
+// something the schema has no room for — a page it cannot read, a scruple about
+// the content — says it anyway, under whatever key it invents. That is exactly
+// what happened on page 2 of a two-page letter: a `submit_analysis` call whose
+// only key was `constraint`, which arrived at validateResult as an analysis
+// with no summary and was reported as the model misbehaving.
+//
+// It was not misbehaving. It was answering the only question it had been left
+// any way to answer. A model given one legal move and something else to say
+// will make an illegal move rather than stay silent. So there are two tools
+// now: the analysis, and a way to say why there is no analysis. A
+// `report_problem` call surfaces as the model's own sentence — a failure the
+// researcher can read and act on — instead of a field-name puzzle.
+const PROBLEM_TOOL = 'report_problem'
+
+const PROBLEM_TOOL_SCHEMA = {
+  type: 'object',
+  properties: {
+    reason: {
+      type: 'string',
+      description: 'Why this page cannot be analyzed, in one or two sentences.'
+    }
+  },
+  required: ['reason']
+}
+
 // `thinking` is deliberately omitted rather than disabled. On current Claude
 // models adaptive thinking is the default, and explicitly disabling it is
 // documented to make some models leak reasoning tags or describe a tool call in
@@ -432,24 +462,11 @@ const SYNTHESIS_TOOL_SCHEMA = {
 // here, the portable choice is to leave thinking alone and give `max_tokens`
 // enough headroom — see MAX_TOKENS.
 //
-// `tool_choice: { type: 'any' }` rather than naming the tool: there is only one
-// tool on offer, so the effect is identical — the response must contain a
-// tool_use block, and it can only be this one — but forcing a *specific* named
-// tool has at times been documented as a narrower instruction than forcing
-// *some* tool call, and there is no reason to take the narrower one when the
-// wider one asks for exactly the same outcome.
-async function callAnthropic (prompt, model, apiKey, { image, signal, schema }) {
-  requireModelFormat(model, 'anthropic', 'claude-sonnet-5')
-
-  const content = []
-  if (image) {
-    content.push({
-      type: 'image',
-      source: { type: 'base64', media_type: image.mediaType, data: image.base64 }
-    })
-  }
-  content.push({ type: 'text', text: prompt })
-
+// `tool_choice: { type: 'any' }` rather than naming submit_analysis: there are
+// two tools on offer and the choice between them is the point. Forcing the
+// analysis tool by name would take the escape hatch away again, which is the
+// condition that produced the `constraint` failure in the first place.
+async function anthropicTurn (messages, model, apiKey, schema, signal) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -461,11 +478,17 @@ async function callAnthropic (prompt, model, apiKey, { image, signal, schema }) 
     body: JSON.stringify({
       model,
       max_tokens: MAX_TOKENS,
-      messages: [{ role: 'user', content }],
+      messages,
       tools: [{
         name: TOOL_NAME,
-        description: 'Submit the structured analysis. This is the only way to answer.',
+        description: 'Submit the structured analysis of this page.',
         input_schema: schema || RESULT_TOOL_SCHEMA
+      }, {
+        name: PROBLEM_TOOL,
+        description:
+          'Report that this page cannot be analyzed, and why. Use this rather ' +
+          'than submitting an incomplete, invented, or off-schema analysis.',
+        input_schema: PROBLEM_TOOL_SCHEMA
       }],
       tool_choice: { type: 'any' }
     })
@@ -485,17 +508,87 @@ async function callAnthropic (prompt, model, apiKey, { image, signal, schema }) 
 
   requireComplete(data?.stop_reason, 'Claude')
 
-  const block = data?.content?.find(b => b.type === 'tool_use' && b.name === TOOL_NAME)
-  if (!block?.input) {
-    throw new Error(`[AUTROPY] Claude did not return the expected tool call: ${JSON.stringify(data)}`)
+  const problem = data?.content?.find(b => b.type === 'tool_use' && b.name === PROBLEM_TOOL)
+  if (problem) {
+    const reason = String(problem.input?.reason ?? '').trim()
+    throw new Error(
+      '[AUTROPY] Claude could not analyze this page: ' +
+      (reason || 'it gave no reason.'))
   }
 
-  // Re-serialized rather than passed through as an object, so every caller —
-  // and every existing test — keeps dealing in the same `{ text, servedModel }`
-  // shape as Gemini and OpenAI. This round trip cannot reintroduce the bug it
-  // exists to avoid: `block.input` is already a parsed value, and
-  // JSON.stringify of a parsed value is always valid, correctly escaped JSON.
-  return { text: JSON.stringify(block.input), servedModel: data?.model || model }
+  const block = data?.content?.find(b => b.type === 'tool_use' && b.name === TOOL_NAME)
+  if (!block?.input) {
+    throw new Error(
+      '[AUTROPY] Claude did not answer through either tool it was offered ' +
+      `(stop_reason: ${data?.stop_reason ?? 'none'}).`)
+  }
+
+  return { data, block }
+}
+
+async function callAnthropic (prompt, model, apiKey, { image, signal, schema, validate }) {
+  requireModelFormat(model, 'anthropic', 'claude-sonnet-5')
+
+  const content = []
+  if (image) {
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: image.mediaType, data: image.base64 }
+    })
+  }
+  content.push({ type: 'text', text: prompt })
+
+  const messages = [{ role: 'user', content }]
+
+  // The second attempt is not a retry. It is the same conversation continued,
+  // with the validator's own complaint handed back as the tool's result — which
+  // is what tool use is for: a tool that rejects its arguments says why, and the
+  // caller corrects itself. The model still has the image, the transcription and
+  // its own previous answer in view, so it is correcting a specific mistake
+  // rather than starting cold.
+  //
+  // It is not free: the whole conversation, image included, is re-sent and
+  // re-billed. Two attempts, not more. A model that submits the wrong shape
+  // twice with its mistake spelled out will not find it on the third try, and
+  // the researcher would be paying for the guess.
+  for (let attempt = 0; ; attempt++) {
+    const { data, block } = await anthropicTurn(messages, model, apiKey, schema, signal)
+    const servedModel = data?.model || model
+
+    // Re-serialized rather than passed through as an object, so every caller —
+    // and every existing test — keeps dealing in the same `{ text, servedModel }`
+    // shape as Gemini and OpenAI. This round trip cannot reintroduce the quoting
+    // bug it exists to avoid: `block.input` is already a parsed value, and
+    // JSON.stringify of a parsed value is always valid, correctly escaped JSON.
+    const text = JSON.stringify(block.input)
+
+    if (typeof validate !== 'function') return { text, servedModel }
+
+    try {
+      validate(block.input)
+      return { text, servedModel }
+    } catch (err) {
+      if (attempt > 0) {
+        throw new Error(
+          `${err.message}\nClaude was shown this and asked to correct it, and ` +
+          `answered the same way again. What it sent: ${text.slice(0, 400)}`)
+      }
+
+      messages.push({ role: 'assistant', content: data.content })
+      messages.push({
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: block.id,
+          is_error: true,
+          content:
+            `${err.message}\n\nResubmit through ${TOOL_NAME} with every required ` +
+            `field filled in. If this page genuinely cannot be analyzed, call ` +
+            `${PROBLEM_TOOL} instead and say why.`
+        }]
+      })
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +635,16 @@ export async function analyze ({
   // so this never has to be threaded through as a separate argument at every
   // call site — it is the same "which shape is this?" question, answered once.
   const schema = validate === validateSynthesis ? SYNTHESIS_TOOL_SCHEMA : RESULT_TOOL_SCHEMA
-  const opts = { image: payload, signal, baseUrl, schema }
+
+  // The validator goes to the provider too, not only to parseResult. Only
+  // callAnthropic uses it, and for a different purpose: parseResult validates
+  // to decide whether the analysis is usable, callAnthropic validates to decide
+  // whether to hand the model back its own mistake and let it try again. The
+  // default matches parseResult's, so the two never disagree about what a good
+  // answer looks like.
+  const opts = {
+    image: payload, signal, baseUrl, schema, validate: validate || validateResult
+  }
 
   let call
   switch (providerFor(model)) {

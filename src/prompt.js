@@ -176,6 +176,11 @@ export function buildPrompt (
   // arrived some other way and Tropy records nothing about whose text it is —
   // calling that "machine-produced" would tell the model that a researcher's
   // own careful transcription is OCR output to be second-guessed.
+  //
+  // For the same reason the model is told not to name the method either. Left
+  // to itself it reached for "OCR" on a page of handwriting a handwriting model
+  // had read — a wrong claim about provenance, written into a summary whose
+  // whole value is that it can be trusted about where its evidence came from.
   const t = normalizeTranscription(transcription)
 
   let transcriptionBlock = ''
@@ -188,7 +193,11 @@ export function buildPrompt (
 
     transcriptionBlock =
       `\n\nTRANSCRIPTION OF THIS PAGE (${origin} — use it as the primary source ` +
-      'for textual content, and say where the image contradicts it):\n' +
+      'for textual content, and say where the image contradicts it). Do not ' +
+      'name the method that produced it: do not call it OCR, HTR, automatic, ' +
+      'or typed by hand. Tropy records no such thing, and a page of handwriting ' +
+      'read by a handwriting model is not OCR. If you refer to it at all, call ' +
+      'it the transcription:\n' +
       `"""\n${t.text}\n"""`
   }
 

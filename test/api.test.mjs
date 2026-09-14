@@ -76,19 +76,92 @@ test('a valid Claude model ID is accepted', async () => {
   assert.equal(result.summary, 'A letter.')
 })
 
-test('the request forces the one tool on offer, rather than naming it', async () => {
-  // Only one tool exists, so `{ type: 'any' }` and naming it produce the same
-  // outcome — the wider instruction is used because it has, at times, been
-  // documented as more compatible with extended thinking than forcing one
-  // specific named tool.
+test('Claude is offered a way to decline, not only a way to answer', async () => {
+  // A forced tool call with no escape hatch is what produced the `constraint`
+  // failure: the model had something to say that the analysis schema had no
+  // room for, and said it in an invented key. `tool_choice: any` must stay
+  // wide precisely so the second tool is reachable.
   const { calls } = await withFetch(
     () => json(claudeToolUse(GOOD_JSON)),
     () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k'))
 
   const body = calls[0].body
-  assert.equal(body.tools.length, 1)
-  assert.equal(body.tools[0].name, 'submit_analysis')
+  assert.deepEqual(body.tools.map(t => t.name), ['submit_analysis', 'report_problem'])
   assert.deepEqual(body.tool_choice, { type: 'any' })
+})
+
+test('a reported problem becomes the model\'s own sentence, not a key name', async () => {
+  const { calls } = await withFetch(
+    () => json({
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use',
+        name: 'report_problem',
+        input: { reason: 'The page is a blank verso with no legible text.' }
+      }]
+    }),
+    () => assert.rejects(
+      () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k'),
+      err => /blank verso with no legible text/.test(err.message) &&
+        !/summary/.test(err.message)))
+
+  assert.equal(calls.length, 1, 'a declared refusal is not worth a second call')
+})
+
+test('an off-schema submission is handed back to the model, once', async () => {
+  // The real failure: a tool call whose only key was `constraint`. The first
+  // response is that; the second is a proper analysis. What matters is that
+  // the correction happens in the same conversation — the second request must
+  // carry the first exchange and a tool_result saying what was wrong.
+  let turn = 0
+  const { result, calls } = await withFetch(
+    () => json(turn++ === 0
+      ? {
+          stop_reason: 'tool_use',
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_1',
+            name: 'submit_analysis',
+            input: { constraint: 'I was not able to read this page.' }
+          }]
+        }
+      : claudeToolUse(GOOD_JSON)),
+    () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k'))
+
+  assert.equal(result.summary, 'A letter.')
+  assert.equal(calls.length, 2)
+
+  const second = calls[1].body.messages
+  assert.equal(second.length, 3, 'the original turn, its answer, and the correction')
+  assert.equal(second[1].role, 'assistant')
+
+  const toolResult = second[2].content[0]
+  assert.equal(toolResult.type, 'tool_result')
+  assert.equal(toolResult.tool_use_id, 'toolu_1')
+  assert.equal(toolResult.is_error, true)
+  assert.match(toolResult.content, /summary/)
+})
+
+test('the same mistake twice is reported, with what the model actually sent', async () => {
+  const offSchema = json({
+    stop_reason: 'tool_use',
+    content: [{
+      type: 'tool_use',
+      id: 'toolu_1',
+      name: 'submit_analysis',
+      input: { constraint: 'I was not able to read this page.' }
+    }]
+  })
+
+  const { calls } = await withFetch(
+    () => offSchema,
+    () => assert.rejects(
+      () => analyzeImage(IMAGE, PROMPT, 'claude-sonnet-5', 'k'),
+      // "Keys returned: constraint" told the researcher nothing about what
+      // Claude was trying to say. The value is the part worth reading.
+      err => /not able to read this page/.test(err.message)))
+
+  assert.equal(calls.length, 2, 'two attempts, then stop paying for guesses')
 })
 
 test('a Gemini display name is rejected with a Gemini example', async () => {
