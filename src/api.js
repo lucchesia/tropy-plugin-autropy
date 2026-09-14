@@ -9,7 +9,7 @@
 // Every provider function returns a result already validated by
 // result-schema.js, so callers never see raw model output.
 
-import { validateResult } from './result-schema.js'
+import { validateResult, validateSynthesis } from './result-schema.js'
 
 // Formats every current vision model accepts. Notably excludes TIFF, which is
 // common in archival collections — Release 2 will transcode via context.sharp.
@@ -361,13 +361,84 @@ async function callOpenAI (prompt, model, apiKey, { image, signal, baseUrl }) {
 // Anthropic
 // ---------------------------------------------------------------------------
 
+// Gemini is asked for `responseMimeType: 'application/json'` and OpenAI for
+// `response_format: json_object` — both providers guarantee, at the API level,
+// that what comes back is syntactically valid JSON. Anthropic's Messages API
+// has no equivalent free-text mode. Without one, "valid JSON" depended on the
+// model getting every escape right in the middle of free-text generation —
+// including while quoting a phrase from a transcription it had itself called
+// corrupted — and a prompt instruction asking it to (see prompt.js) measurably
+// reduced but did not eliminate that.
+//
+// Tool use is Anthropic's equivalent guarantee. Forcing a single tool call
+// moves responsibility for JSON-encoding the answer from the model's own token
+// stream to Anthropic's own tool-call serialization — the API decides how to
+// escape a literal `"` when it packages `content[].input`, not the model
+// composing text a character at a time. `JSON.stringify(block.input)` below
+// therefore cannot produce anything parseResult can choke on: it is
+// synthesizing that JSON text itself, from an already-parsed value, not
+// re-parsing text the provider sent.
+const TOOL_NAME = 'submit_analysis'
+
+const RESULT_TOOL_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    document_type: {
+      type: 'string',
+      enum: ['photograph', 'manuscript', 'letter', 'administrative_document',
+        'press_clipping', 'postcard', 'map', 'drawing', 'printed_book',
+        'object', 'unknown']
+    },
+    possible_tags: { type: 'array', items: { type: 'string' } },
+    metadata_suggestions: {
+      type: 'object',
+      properties: {
+        title: { type: ['string', 'null'] },
+        date: { type: ['string', 'null'] },
+        description: { type: ['string', 'null'] }
+      },
+      required: ['title', 'date', 'description']
+    },
+    confidence: { type: 'number', minimum: 0, maximum: 1 }
+  },
+  required: [
+    'summary', 'document_type', 'possible_tags', 'metadata_suggestions', 'confidence'
+  ]
+}
+
+const SYNTHESIS_TOOL_SCHEMA = {
+  type: 'object',
+  properties: {
+    item_summary: { type: 'string' },
+    metadata_suggestions: {
+      type: 'object',
+      properties: {
+        title: { type: ['string', 'null'] },
+        date: { type: ['string', 'null'] },
+        description: { type: ['string', 'null'] }
+      },
+      required: ['title', 'date', 'description']
+    },
+    confidence: { type: 'number', minimum: 0, maximum: 1 }
+  },
+  required: ['item_summary', 'metadata_suggestions', 'confidence']
+}
+
 // `thinking` is deliberately omitted rather than disabled. On current Claude
 // models adaptive thinking is the default, and explicitly disabling it is
 // documented to make some models leak reasoning tags or describe a tool call in
 // visible text instead of making it. Since the researcher can type any model ID
 // here, the portable choice is to leave thinking alone and give `max_tokens`
 // enough headroom — see MAX_TOKENS.
-async function callAnthropic (prompt, model, apiKey, { image, signal }) {
+//
+// `tool_choice: { type: 'any' }` rather than naming the tool: there is only one
+// tool on offer, so the effect is identical — the response must contain a
+// tool_use block, and it can only be this one — but forcing a *specific* named
+// tool has at times been documented as a narrower instruction than forcing
+// *some* tool call, and there is no reason to take the narrower one when the
+// wider one asks for exactly the same outcome.
+async function callAnthropic (prompt, model, apiKey, { image, signal, schema }) {
   requireModelFormat(model, 'anthropic', 'claude-sonnet-5')
 
   const content = []
@@ -390,7 +461,13 @@ async function callAnthropic (prompt, model, apiKey, { image, signal }) {
     body: JSON.stringify({
       model,
       max_tokens: MAX_TOKENS,
-      messages: [{ role: 'user', content }]
+      messages: [{ role: 'user', content }],
+      tools: [{
+        name: TOOL_NAME,
+        description: 'Submit the structured analysis. This is the only way to answer.',
+        input_schema: schema || RESULT_TOOL_SCHEMA
+      }],
+      tool_choice: { type: 'any' }
     })
   })
 
@@ -408,12 +485,17 @@ async function callAnthropic (prompt, model, apiKey, { image, signal }) {
 
   requireComplete(data?.stop_reason, 'Claude')
 
-  const block = data?.content?.find(b => b.type === 'text')
-  if (!block?.text) {
-    throw new Error(`[AUTROPY] Claude returned no text block: ${JSON.stringify(data)}`)
+  const block = data?.content?.find(b => b.type === 'tool_use' && b.name === TOOL_NAME)
+  if (!block?.input) {
+    throw new Error(`[AUTROPY] Claude did not return the expected tool call: ${JSON.stringify(data)}`)
   }
 
-  return { text: block.text, servedModel: data?.model || model }
+  // Re-serialized rather than passed through as an object, so every caller —
+  // and every existing test — keeps dealing in the same `{ text, servedModel }`
+  // shape as Gemini and OpenAI. This round trip cannot reintroduce the bug it
+  // exists to avoid: `block.input` is already a parsed value, and
+  // JSON.stringify of a parsed value is always valid, correctly escaped JSON.
+  return { text: JSON.stringify(block.input), servedModel: data?.model || model }
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +535,14 @@ export async function analyze ({
     }
   }
 
-  const opts = { image: payload, signal, baseUrl }
+  // Only callAnthropic reads this — Gemini and OpenAI already constrain their
+  // own output to valid JSON via responseMimeType / response_format and have
+  // no schema parameter to pass it to. Chosen by identity against the same
+  // `validate` function parseResult already uses to pick a response shape,
+  // so this never has to be threaded through as a separate argument at every
+  // call site — it is the same "which shape is this?" question, answered once.
+  const schema = validate === validateSynthesis ? SYNTHESIS_TOOL_SCHEMA : RESULT_TOOL_SCHEMA
+  const opts = { image: payload, signal, baseUrl, schema }
 
   let call
   switch (providerFor(model)) {

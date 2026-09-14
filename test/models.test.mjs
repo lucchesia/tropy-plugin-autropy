@@ -13,7 +13,8 @@ import {
   ABSENT,
   DECLINED,
   UNWRITABLE,
-  validateResult
+  validateResult,
+  validateSynthesis
 } from '../src/result-schema.js'
 import { buildPanelHTML } from '../src/panel-template.js'
 import { createRun, setResult } from '../src/run.js'
@@ -72,16 +73,24 @@ const VALID_JSON = JSON.stringify({
   confidence: 0.8
 })
 
+// Claude answers via a forced tool call, not free text — see api.js on why.
+// `input` is what the response actually carries, already parsed.
+function claudeToolUse (parsed, extra = {}) {
+  return {
+    content: [{ type: 'tool_use', name: 'submit_analysis', input: parsed }],
+    ...extra
+  }
+}
+
 test('a text-only call sends no image block', async () => {
   // The item synthesis reads per-photo summaries, not pictures. Forcing it
   // through the image path would mean paying to re-send a scan that has nothing
   // to do with the question.
   const capture = {}
   const original = globalThis.fetch
-  globalThis.fetch = stubFetch({
-    model: 'claude-opus-5-20260101',
-    content: [{ type: 'text', text: VALID_JSON }]
-  }, capture)
+  globalThis.fetch = stubFetch(
+    claudeToolUse(JSON.parse(VALID_JSON), { model: 'claude-opus-5-20260101' }),
+    capture)
 
   try {
     const { result, servedModel } = await analyze({
@@ -104,7 +113,7 @@ test('a text-only call sends no image block', async () => {
 test('an image call still sends the image', async () => {
   const capture = {}
   const original = globalThis.fetch
-  globalThis.fetch = stubFetch({ content: [{ type: 'text', text: VALID_JSON }] }, capture)
+  globalThis.fetch = stubFetch(claudeToolUse(JSON.parse(VALID_JSON)), capture)
 
   try {
     await analyze({
@@ -126,9 +135,7 @@ test('an image call still sends the image', async () => {
 test('analyze uses the schema it is given', async () => {
   const capture = {}
   const original = globalThis.fetch
-  globalThis.fetch = stubFetch({
-    content: [{ type: 'text', text: '{"item_summary":"Six pages."}' }]
-  }, capture)
+  globalThis.fetch = stubFetch(claudeToolUse({ item_summary: 'Six pages.' }), capture)
 
   try {
     const { result } = await analyze({
@@ -139,6 +146,31 @@ test('analyze uses the schema it is given', async () => {
     })
 
     assert.deepEqual(result, { itemSummary: 'Six pages.' })
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a synthesis call is offered the synthesis tool schema', async () => {
+  // Which schema Claude is offered is chosen by the same `validate` function
+  // parseResult already uses to pick a response shape — see api.js. This is
+  // the half of that choice analyzeImage can never reach on its own, since it
+  // always uses the default, per-photo validate.
+  const capture = {}
+  const original = globalThis.fetch
+  globalThis.fetch = stubFetch(claudeToolUse({ item_summary: 'Six pages.' }), capture)
+
+  try {
+    await analyze({
+      model: 'claude-opus-5',
+      prompt: 'synthesize',
+      apiKey: 'k',
+      validate: validateSynthesis
+    })
+
+    const props = capture.body.tools[0].input_schema.properties
+    assert.ok('item_summary' in props)
+    assert.ok(!('summary' in props))
   } finally {
     globalThis.fetch = original
   }
