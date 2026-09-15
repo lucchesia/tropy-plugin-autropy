@@ -25,7 +25,7 @@ copy of its code until the app restarts, even though Preferences reports the new
 Then open **Preferences → Plugins → Autropy** and set a **Model ID** and an **API Key**. The plugin
 does nothing until you invoke it.
 
-Requires **Tropy 1.18.0-beta.5 or later**, or Tropy 1.17.x. See
+Requires **Tropy Beta** (currently 1.18.0-beta.5 or later). See
 [Tropy compatibility](#tropy-compatibility).
 
 > **This is a beta.** It writes notes, tags and metadata into your project. Back up your `.tropy`
@@ -366,11 +366,6 @@ rather than when you check it.
 addresses that project explicitly, and verifies the path Tropy reports before writing anything. If it
 cannot prove the target — no project open, two projects sharing a filename, or the project changing
 between analysis and Apply — it refuses to write and says why. Nothing is written on a failed check.
-
-On **Tropy 1.17.x** there is no project-scoped route, so the guarantee is weaker: Autropy verifies
-before and after each operation, which is enough to discard a read before it reaches a provider, but
-a write can only be reported after the fact. On 1.17.x, keep a single project window open while
-analyzing.
 
 On startup Autropy logs one line naming the plugin version, the port and the model. Logs are at
 `~/Library/Logs/Tropy Beta/` on macOS.
