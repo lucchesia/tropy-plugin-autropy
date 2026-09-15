@@ -25,8 +25,8 @@ copy of its code until the app restarts, even though Preferences reports the new
 Then open **Preferences → Plugins → Autropy** and set a **Model ID** and an **API Key**. The plugin
 does nothing until you invoke it.
 
-Requires **Tropy Beta** (currently 1.18.0-beta.5 or later). See
-[Tropy compatibility](#tropy-compatibility).
+Requires **[Tropy Beta](https://github.com/tropy/tropy/releases)** (currently 1.18.0-beta.5 or
+later). See [Tropy compatibility](#tropy-compatibility).
 
 > **This is a beta.** It writes notes, tags and metadata into your project. Back up your `.tropy`
 > file before using it on work you care about, and read [Limitations](#limitations).
@@ -350,7 +350,7 @@ swept into a prompt.
 Autropy reads and writes through Tropy's local REST API, whose shape changed during the 1.18 beta
 cycle.
 
-**Tropy 1.18.0-beta.5 and later** namespace every route under a project id —
+**[Tropy 1.18.0-beta.5](https://github.com/tropy/tropy/releases) and later** namespace every route under a project id —
 `/project/<id>/data/<item>`. Older builds used flat routes — `/project/data/<item>`. beta.5 ships a
 compatibility redirect for the old form, but it fails with **HTTP 500** for any URL with a trailing
 segment, which affects any plugin or script addressing a Tropy item by id. Autropy detects which
